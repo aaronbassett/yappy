@@ -582,11 +582,11 @@
 ### Security
 - [x] T299 [P] Implement config file permission warning in crates/yappy-server/src/main.rs (use devs:rust-dev agent)
 - [x] T300 [P] Implement input text size validation (64KB max) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T301 [GIT] Commit: add security validations
+- [x] T301 [GIT] Commit: add security validations
 
 ### Observability
-- [ ] T302 [P] Add session ID to all tracing spans in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T303 [P] Add X-Request-ID header to HTTP responses in crates/yappy-server/src/app.rs (use devs:rust-dev agent)
+- [x] T302 [P] Add session ID to all tracing spans in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T303 [P] Add X-Request-ID header to HTTP responses in crates/yappy-server/src/app.rs (pre-existing)
 - [ ] T304 [GIT] Commit: add observability improvements
 
 ### Validation

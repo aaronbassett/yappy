@@ -56,7 +56,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, trace, warn};
+use tracing::{debug, info, instrument, trace, warn, Span};
 use yappy_core::audio::AudioCodec;
 use yappy_core::buffer::{BufferConfig, Sentence};
 use yappy_core::provider::ProviderId;
@@ -184,7 +184,7 @@ pub async fn ws_upgrade_handler(State(state): State<AppState>, ws: WebSocketUpgr
 /// - Sequence numbers: Maintained per-session in [`Session::audio_sequence`]
 /// - Statistics: Accumulated per-session in [`Session::total_duration_ms`] and [`Session::total_bytes`]
 #[allow(clippy::too_many_lines)]
-#[instrument(name = "ws_connection", skip_all, fields(remote_addr))]
+#[instrument(name = "ws_connection", skip_all, fields(remote_addr, session_id = tracing::field::Empty))]
 async fn handle_socket(socket: WebSocket, state: AppState) {
     info!("WebSocket connection established");
 
@@ -220,6 +220,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Session state for this connection (None until session.init is received)
     let mut session: Option<Session> = None;
+
+    // Track whether we've recorded the session_id to the current span (NFR-005)
+    let mut session_id_recorded = false;
 
     // Track connection start time for session init timeout (T297)
     let connection_start = Instant::now();
@@ -329,6 +332,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         ).await {
                             // Connection should be closed
                             break;
+                        }
+
+                        // Record session_id to the current span once session is initialized (NFR-005)
+                        // This ensures all subsequent logs within this connection include session_id
+                        if !session_id_recorded {
+                            if let Some(ref s) = session {
+                                Span::current().record("session_id", s.id.to_string().as_str());
+                                session_id_recorded = true;
+                            }
                         }
                     }
                     Some(Err(err)) => {
