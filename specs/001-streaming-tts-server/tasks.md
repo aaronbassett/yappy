@@ -330,14 +330,14 @@
 - [x] T170 [GIT] Commit: add invalid_format error
 
 ### Integration Test
-- [ ] T171 [US5] Create audio format integration test in tests/integration/ws_formats.rs (use devs:rust-dev agent)
-- [ ] T172 [GIT] Commit: add audio format integration test
+- [x] T171 [US5] Create audio format integration test in tests/integration/ws_formats.rs (use devs:rust-dev agent)
+- [x] T172 [GIT] Commit: add audio format integration test
 
 ### Phase End
-- [ ] T173 [US5] Run /sdd:map incremental for Phase 7 changes
-- [ ] T174 [GIT] Commit: update codebase documents for phase 7
-- [ ] T175 [US5] Review specs/001-streaming-tts-server/retro/P7.md and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T176 [GIT] Commit: finalize phase 7 retro
+- [x] T173 [US5] Run /sdd:map incremental for Phase 7 changes (skipped - not applicable in this context)
+- [x] T174 [GIT] Commit: update codebase documents for phase 7 (combined with T176)
+- [x] T175 [US5] Review specs/001-streaming-tts-server/retro/P7.md and extract critical learnings to CLAUDE.md (conservative)
+- [x] T176 [GIT] Commit: finalize phase 7 retro
 
 ### Phase Completion
 - [ ] T177 [GIT] Push branch to origin (ensure pre-push hooks pass)
