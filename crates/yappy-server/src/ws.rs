@@ -20,6 +20,8 @@
 //! Per project requirements, text content is never logged. Only metadata such as
 //! message types, frame sizes, and connection events are recorded.
 
+use std::time::Duration;
+
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -31,7 +33,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 use yappy_core::audio::AudioCodec;
-use yappy_core::buffer::Sentence;
+use yappy_core::buffer::{BufferConfig, Sentence};
 use yappy_core::provider::ProviderId;
 use yappy_core::transcode::Transcoder;
 use yappy_core::{
@@ -40,6 +42,10 @@ use yappy_core::{
 };
 
 use crate::state::{AppState, ProviderRegistry};
+
+/// Default flush timeout when no session is active yet.
+/// This is only used before session.init is received.
+const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// WebSocket upgrade handler for the `/ws` endpoint.
 ///
@@ -100,19 +106,74 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // Session state for this connection (None until session.init is received)
     let mut session: Option<Session> = None;
 
-    // Process incoming messages
-    while let Some(result) = receiver.next().await {
-        match result {
-            Ok(message) => {
-                if !process_message(message, &mut sender, &mut session, state.providers()).await {
-                    // Connection should be closed
-                    break;
+    // Process incoming messages with flush timeout support
+    loop {
+        // Determine the flush timeout duration based on session state.
+        // If we have a session with content in the buffer, use its configured timeout.
+        // Otherwise, use a longer timeout (effectively just waiting for messages).
+        let flush_timeout = session
+            .as_ref()
+            .filter(|s| !s.buffer.is_empty() && s.state == SessionState::Streaming)
+            .map_or(DEFAULT_FLUSH_TIMEOUT, |s| s.buffer.flush_timeout());
+
+        tokio::select! {
+            // Wait for the next WebSocket message
+            result = receiver.next() => {
+                match result {
+                    Some(Ok(message)) => {
+                        let buffer_config: BufferConfig = state.config().buffer.clone().into();
+                        if !process_message(message, &mut sender, &mut session, state.providers(), &buffer_config).await {
+                            // Connection should be closed
+                            break;
+                        }
+                    }
+                    Some(Err(err)) => {
+                        // Log connection errors without exposing internal details
+                        warn!("WebSocket receive error: {}", err);
+                        break;
+                    }
+                    None => {
+                        // Stream ended
+                        break;
+                    }
                 }
             }
-            Err(err) => {
-                // Log connection errors without exposing internal details
-                warn!("WebSocket receive error: {}", err);
-                break;
+
+            // Check for flush timeout when buffer has content
+            () = tokio::time::sleep(flush_timeout), if session.as_ref().is_some_and(|s| !s.buffer.is_empty() && s.state == SessionState::Streaming) => {
+                // Check if the buffer should be flushed due to timeout
+                if let Some(ref mut session) = session {
+                    if session.buffer.should_timeout_flush() {
+                        if let Some(sentence) = session.buffer.flush() {
+                            debug!(
+                                session_id = %session.id,
+                                sentence_index = sentence.index,
+                                "Flushed buffer due to timeout (no sentence boundary detected)"
+                            );
+
+                            // Synthesize the flushed sentence
+                            if let Some(provider) = state.providers().get(&session.provider_id) {
+                                if !synthesize_and_stream(
+                                    vec![sentence],
+                                    session,
+                                    &mut sender,
+                                    provider.as_ref(),
+                                )
+                                .await
+                                {
+                                    // Fatal error during synthesis
+                                    break;
+                                }
+                            } else {
+                                warn!(
+                                    session_id = %session.id,
+                                    provider_id = %session.provider_id,
+                                    "Provider not found during timeout flush synthesis"
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -144,18 +205,22 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 /// * `sender` - Mutable reference to the sender half for responses
 /// * `session` - Mutable reference to the current session state
 /// * `providers` - Reference to the provider registry
+/// * `buffer_config` - Buffer configuration for new sessions
 async fn process_message<S>(
     message: Message,
     sender: &mut S,
     session: &mut Option<Session>,
     providers: &ProviderRegistry,
+    buffer_config: &BufferConfig,
 ) -> bool
 where
     S: SinkExt<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
     match message {
-        Message::Text(text) => handle_text_message(&text, sender, session, providers).await,
+        Message::Text(text) => {
+            handle_text_message(&text, sender, session, providers, buffer_config).await
+        }
         Message::Binary(data) => handle_binary_message(&data, sender).await,
         Message::Ping(_) => {
             // Axum automatically responds to pings with pongs
@@ -198,6 +263,7 @@ async fn handle_text_message<S>(
     sender: &mut S,
     session: &mut Option<Session>,
     providers: &ProviderRegistry,
+    buffer_config: &BufferConfig,
 ) -> bool
 where
     S: SinkExt<Message> + Unpin,
@@ -228,6 +294,7 @@ where
                         voice,
                         audio_format,
                         code_block_mode,
+                        buffer_config,
                     )
                     .await
                 }
@@ -428,6 +495,7 @@ async fn handle_session_init<S>(
     requested_voice: Option<VoiceConfig>,
     requested_format: Option<AudioFormat>,
     requested_code_block_mode: Option<CodeBlockMode>,
+    buffer_config: &BufferConfig,
 ) -> bool
 where
     S: SinkExt<Message> + Unpin,
@@ -554,12 +622,13 @@ where
     // Resolve code block mode
     let code_block_mode = requested_code_block_mode.unwrap_or_default();
 
-    // Create the session
-    let new_session = Session::new(
+    // Create the session with the configured buffer settings
+    let new_session = Session::with_buffer_config(
         provider_id,
         voice.clone(),
         audio_format.clone(),
         code_block_mode,
+        buffer_config.clone(),
     );
     let session_id = new_session.id.clone();
 
@@ -1177,6 +1246,11 @@ mod tests {
         registry
     }
 
+    /// Helper to create default buffer config for tests
+    fn default_buffer_config() -> BufferConfig {
+        BufferConfig::default()
+    }
+
     // ==================== Session Init Tests ====================
 
     #[tokio::test]
@@ -1186,7 +1260,14 @@ mod tests {
         let registry = create_test_registry();
         let text = r#"{"type":"session.init"}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert!(session.is_some());
@@ -1219,7 +1300,14 @@ mod tests {
         let registry = create_test_registry();
         let text = r#"{"type":"session.init","provider":"test"}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert!(session.is_some());
@@ -1233,7 +1321,14 @@ mod tests {
         let registry = create_test_registry_with_voices();
         let text = r#"{"type":"session.init","voice":{"id":"voice_alice","speed":1.5}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert!(session.is_some());
@@ -1249,7 +1344,14 @@ mod tests {
         // Test with voice parameters at valid boundary values
         let text = r#"{"type":"session.init","voice":{"id":"voice_bob","speed":2.0,"pitch":1.0,"volume":0.0}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert!(session.is_some());
@@ -1267,7 +1369,14 @@ mod tests {
         let registry = create_empty_registry();
         let text = r#"{"type":"session.init"}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return false (fatal error)
         assert!(!should_continue);
@@ -1294,7 +1403,14 @@ mod tests {
         let registry = create_test_registry();
         let text = r#"{"type":"session.init","provider":"nonexistent"}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return false (fatal error)
         assert!(!should_continue);
@@ -1335,7 +1451,14 @@ mod tests {
 
         let text = r#"{"type":"session.init","provider":"broken"}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(!should_continue);
         assert!(session.is_none());
@@ -1367,14 +1490,28 @@ mod tests {
         // First init
         let mut session = None;
         let text = r#"{"type":"session.init"}"#;
-        let _ = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let _ = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert!(session.is_some());
 
         // Clear sink for second message
         sink.messages.clear();
 
         // Second init should fail
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return true (not fatal, just ignored)
         assert!(should_continue);
@@ -1400,7 +1537,14 @@ mod tests {
         let registry = create_test_registry_with_voices();
         let text = r#"{"type":"session.init","voice":{"id":"nonexistent_voice"}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return false (fatal error)
         assert!(!should_continue);
@@ -1439,7 +1583,14 @@ mod tests {
         // Speed below valid range (0.5 - 2.0)
         let text = r#"{"type":"session.init","voice":{"id":"voice_alice","speed":0.3}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return false (fatal error)
         assert!(!should_continue);
@@ -1468,7 +1619,14 @@ mod tests {
         // Speed above valid range (0.5 - 2.0)
         let text = r#"{"type":"session.init","voice":{"id":"voice_alice","speed":3.0}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return false (fatal error)
         assert!(!should_continue);
@@ -1497,7 +1655,14 @@ mod tests {
         // Pitch outside valid range (-1.0 to 1.0)
         let text = r#"{"type":"session.init","voice":{"id":"voice_alice","pitch":1.5}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return false (fatal error)
         assert!(!should_continue);
@@ -1526,7 +1691,14 @@ mod tests {
         // Volume outside valid range (0.0 to 1.0)
         let text = r#"{"type":"session.init","voice":{"id":"voice_alice","volume":1.5}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return false (fatal error)
         assert!(!should_continue);
@@ -1555,7 +1727,14 @@ mod tests {
         // Negative volume is invalid
         let text = r#"{"type":"session.init","voice":{"id":"voice_alice","volume":-0.5}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return false (fatal error)
         assert!(!should_continue);
@@ -1584,7 +1763,14 @@ mod tests {
         // No voice specified - should use first voice
         let text = r#"{"type":"session.init"}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert!(session.is_some());
@@ -1635,7 +1821,14 @@ mod tests {
         // Try to use provider1's voice with provider2 - should fail
         let text =
             r#"{"type":"session.init","provider":"provider2","voice":{"id":"provider1_voice"}}"#;
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return false (fatal error)
         assert!(!should_continue);
@@ -1820,7 +2013,14 @@ mod tests {
         // Request Opus which is natively supported
         let text = r#"{"type":"session.init","audio_format":{"codec":"opus","sample_rate":48000,"channels":1}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert!(session.is_some());
@@ -1845,7 +2045,14 @@ mod tests {
         // Request MP3 which can be transcoded from PCM
         let text = r#"{"type":"session.init","audio_format":{"codec":"mp3","sample_rate":24000,"channels":1}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert!(session.is_some());
@@ -1870,7 +2077,14 @@ mod tests {
         // Request MP3 which can't be provided
         let text = r#"{"type":"session.init","audio_format":{"codec":"mp3","sample_rate":48000,"channels":1}}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should return false (fatal error)
         assert!(!should_continue);
@@ -1914,7 +2128,14 @@ mod tests {
         // No format specified - should use first one (PCM)
         let text = r#"{"type":"session.init"}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert!(session.is_some());
@@ -1934,7 +2155,14 @@ mod tests {
         let registry = create_test_registry();
         let text = r#"{"type":"text","content":"Hello world"}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert_eq!(sink.messages.len(), 1);
@@ -1957,7 +2185,14 @@ mod tests {
         let registry = create_test_registry();
         let text = r#"{"type":"text.done"}"#;
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert_eq!(sink.messages.len(), 1);
@@ -1980,7 +2215,14 @@ mod tests {
         let registry = create_test_registry();
         let text = "not valid json";
 
-        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert_eq!(sink.messages.len(), 1);
@@ -2030,7 +2272,14 @@ mod tests {
         let registry = create_test_registry();
         let message = Message::Close(None);
 
-        let should_continue = process_message(message, &mut sink, &mut session, &registry).await;
+        let should_continue = process_message(
+            message,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(!should_continue);
     }
@@ -2042,7 +2291,14 @@ mod tests {
         let registry = create_test_registry();
         let message = Message::Ping(vec![1, 2, 3].into());
 
-        let should_continue = process_message(message, &mut sink, &mut session, &registry).await;
+        let should_continue = process_message(
+            message,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         // No response expected (Axum handles pong automatically)
@@ -2079,8 +2335,14 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        let should_continue =
-            handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert!(should_continue);
         assert!(session.is_some());
         assert_eq!(session.as_ref().unwrap().state, SessionState::Ready);
@@ -2091,8 +2353,14 @@ mod tests {
         // SRX-based sentence detection only emits sentences when followed by more text,
         // which is correct for streaming TTS (we need to know the sentence is complete).
         let text_msg = r#"{"type":"text","content":"Hello world. And more"}"#;
-        let should_continue =
-            handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text_msg,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert!(should_continue);
 
         // Now we expect binary audio frames for the complete sentence
@@ -2117,13 +2385,26 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         sink.messages.clear();
 
         // Send text with multiple sentences
         let text_msg = r#"{"type":"text","content":"First sentence. Second sentence. Third"}"#;
-        let should_continue =
-            handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text_msg,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert!(should_continue);
 
         // Now we expect 2 binary audio frames (one for each complete sentence)
@@ -2147,7 +2428,14 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         let initial_activity = session.as_ref().unwrap().last_activity;
 
@@ -2158,7 +2446,14 @@ mod tests {
 
         // Send text (no complete sentence, so no audio)
         let text_msg = r#"{"type":"text","content":"Test"}"#;
-        handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            text_msg,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // last_activity should be updated
         assert!(session.as_ref().unwrap().last_activity > initial_activity);
@@ -2172,17 +2467,38 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         sink.messages.clear();
 
         // First text message with complete sentence - transitions to Streaming
         let text_msg1 = r#"{"type":"text","content":"First. "}"#;
-        handle_text_message(text_msg1, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            text_msg1,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
 
         // Second text message with complete sentence - stays in Streaming
         let text_msg2 = r#"{"type":"text","content":"Second. "}"#;
-        handle_text_message(text_msg2, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            text_msg2,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
 
         // Now we expect 2 binary audio frames (one for each complete sentence)
@@ -2201,13 +2517,26 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         sink.messages.clear();
 
         // Send text.done
         let done_text = r#"{"type":"text.done"}"#;
-        let should_continue =
-            handle_text_message(done_text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            done_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         assert_eq!(sink.messages.len(), 1);
@@ -2243,12 +2572,26 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         sink.messages.clear();
 
         // Send text with complete sentences and an incomplete one
         let text_msg = r#"{"type":"text","content":"First sentence. Second sentence. Incomplete"}"#;
-        handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            text_msg,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // 2 binary audio frames should have been sent for the 2 complete sentences
         assert_eq!(sink.messages.len(), 2);
@@ -2265,8 +2608,14 @@ mod tests {
 
         // Send text.done - should flush the incomplete text and synthesize it
         let done_text = r#"{"type":"text.done"}"#;
-        let should_continue =
-            handle_text_message(done_text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            done_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         assert!(should_continue);
         // Expect 1 binary frame for the flushed sentence + 1 text frame for audio.done
@@ -2306,19 +2655,40 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert_eq!(session.as_ref().unwrap().state, SessionState::Ready);
 
         // Send text with complete sentence - transitions to Streaming
         let text_msg = r#"{"type":"text","content":"Hello. "}"#;
-        handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            text_msg,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
 
         sink.messages.clear();
 
         // Send text.done - transitions to Closed (through Completing)
         let done_text = r#"{"type":"text.done"}"#;
-        handle_text_message(done_text, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            done_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Final state should be Closed
         assert_eq!(session.as_ref().unwrap().state, SessionState::Closed);
@@ -2332,8 +2702,14 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        let should_continue =
-            handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert!(should_continue);
         assert!(session.is_some());
         sink.messages.clear();
@@ -2342,8 +2718,14 @@ mod tests {
         // SRX detects "Hello world." as complete because it's followed by " Goodbye world."
         // "Goodbye world." stays in buffer because there's no following text yet.
         let text_msg = r#"{"type":"text","content":"Hello world. Goodbye world."}"#;
-        let should_continue =
-            handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text_msg,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert!(should_continue);
         // 1 binary frame for the first complete sentence
         assert_eq!(sink.messages.len(), 1);
@@ -2353,8 +2735,14 @@ mod tests {
 
         // Send text.done - this flushes "Goodbye world." from buffer
         let done_text = r#"{"type":"text.done"}"#;
-        let should_continue =
-            handle_text_message(done_text, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            done_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         assert!(should_continue);
 
         // Verify flushed sentence audio + audio.done was sent
@@ -2394,13 +2782,27 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         sink.messages.clear();
 
         // Send text with one complete sentence followed by more text (streaming style).
         // SRX needs following text to detect sentence boundaries.
         let text_msg = r#"{"type":"text","content":"Hello world. More text here"}"#;
-        handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            text_msg,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should have 1 binary frame for "Hello world."
         assert_eq!(sink.messages.len(), 1);
@@ -2438,15 +2840,28 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         sink.messages.clear();
 
         // Send text with one complete sentence followed by more text (streaming style).
         // SRX needs following text to detect sentence boundaries.
         // Synthesis will fail for "Hello world."
         let text_msg = r#"{"type":"text","content":"Hello world. More text"}"#;
-        let should_continue =
-            handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        let should_continue = handle_text_message(
+            text_msg,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should continue (non-fatal error)
         assert!(should_continue);
@@ -2483,7 +2898,14 @@ mod tests {
 
         // Initialize session
         let init_text = r#"{"type":"session.init"}"#;
-        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            init_text,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
         sink.messages.clear();
 
         // Send text with three complete sentences followed by more text.
@@ -2491,7 +2913,14 @@ mod tests {
         // "First." and "Second." are followed by more text, so they're emitted.
         // "Third." is followed by " More" so it's also emitted.
         let text_msg = r#"{"type":"text","content":"First. Second. Third. More"}"#;
-        handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        handle_text_message(
+            text_msg,
+            &mut sink,
+            &mut session,
+            &registry,
+            &default_buffer_config(),
+        )
+        .await;
 
         // Should have 3 binary frames
         assert_eq!(sink.messages.len(), 3);

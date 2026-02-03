@@ -5,7 +5,7 @@ use std::time::Instant;
 use uuid::Uuid;
 
 use crate::audio::AudioFormat;
-use crate::buffer::SentenceBuffer;
+use crate::buffer::{BufferConfig, SentenceBuffer};
 use crate::provider::ProviderId;
 
 /// Unique session identifier
@@ -109,6 +109,31 @@ impl Session {
     /// Update last activity timestamp
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
+    }
+
+    /// Create a new session with custom buffer configuration
+    pub fn with_buffer_config(
+        provider_id: ProviderId,
+        voice: VoiceConfig,
+        audio_format: AudioFormat,
+        code_block_mode: CodeBlockMode,
+        buffer_config: BufferConfig,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            id: SessionId::new(),
+            provider_id,
+            voice,
+            audio_format,
+            buffer: SentenceBuffer::new(buffer_config),
+            created_at: now,
+            last_activity: now,
+            state: SessionState::Ready,
+            code_block_mode,
+            total_duration_ms: 0,
+            total_bytes: 0,
+            audio_sequence: 0,
+        }
     }
 }
 

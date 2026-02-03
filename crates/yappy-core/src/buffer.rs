@@ -352,6 +352,11 @@ impl SentenceBuffer {
         self.sentence_index
     }
 
+    /// Get the configured flush timeout duration
+    pub const fn flush_timeout(&self) -> Duration {
+        self.config.flush_timeout
+    }
+
     /// Find the next sentence boundary in the buffer using SRX rules.
     ///
     /// Uses the embedded SRX (Segmentation Rules eXchange) rule set for

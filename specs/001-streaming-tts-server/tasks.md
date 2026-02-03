@@ -402,12 +402,12 @@
 - [x] T204 [GIT] Commit: initialize phase 9 retro
 
 ### Sentence Buffer Enhancement
-- [ ] T205 [US7] Implement SRX-based sentence segmentation with srx crate in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
-- [ ] T206 [GIT] Commit: add SRX segmentation
-- [ ] T207 [US7] Add custom SRX rules for abbreviations (Dr., Mrs., U.S.A., e.g., i.e.) in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
-- [ ] T208 [GIT] Commit: add abbreviation rules
-- [ ] T209 [US7] Add custom SRX rules for decimal numbers (3.14, 2.5) in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
-- [ ] T210 [GIT] Commit: add decimal rules
+- [x] T205 [US7] Implement SRX-based sentence segmentation with srx crate in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
+- [x] T206 [GIT] Commit: add SRX segmentation
+- [x] T207 [US7] Add custom SRX rules for abbreviations (Dr., Mrs., U.S.A., e.g., i.e.) in crates/yappy-core/src/buffer.rs (implemented in T205)
+- [x] T208 [GIT] Commit: add abbreviation rules (committed in T206)
+- [x] T209 [US7] Add custom SRX rules for decimal numbers (3.14, 2.5) in crates/yappy-core/src/buffer.rs (implemented in T205)
+- [x] T210 [GIT] Commit: add decimal rules (committed in T206)
 - [ ] T211 [US7] Implement flush timeout logic in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
 - [ ] T212 [GIT] Commit: add flush timeout
 - [ ] T213 [US7] Implement max buffer overflow with clause/word boundary split in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)

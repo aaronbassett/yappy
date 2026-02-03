@@ -172,6 +172,9 @@ impl TestServerBuilder {
         }
 
         // Create minimal test configuration
+        // Use a long flush timeout (5 seconds) to prevent auto-flush during tests,
+        // preserving the original test semantics where buffers only flush on text.done.
+        // Tests that want to test flush timeout behavior should use a custom config.
         let config = Config {
             server: ServerConfig::default(),
             providers: ProvidersConfig {
@@ -180,7 +183,10 @@ impl TestServerBuilder {
                 kokoro: None,
                 avspeech: None,
             },
-            buffer: BufferConfigToml::default(),
+            buffer: BufferConfigToml {
+                flush_timeout_ms: 5000, // 5 seconds - long enough to prevent auto-flush in tests
+                max_size_bytes: 4096,
+            },
         };
 
         // Create application state

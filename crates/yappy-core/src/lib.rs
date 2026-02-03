@@ -35,7 +35,7 @@ pub mod transcode;
 
 // Re-exports for convenience
 pub use audio::{AudioChunk, AudioCodec, AudioFormat};
-pub use buffer::SentenceBuffer;
+pub use buffer::{BufferConfig, SentenceBuffer};
 pub use config::{Config, ConfigValidationError};
 pub use error::{ErrorResponse, ProviderError, SessionError};
 pub use message::{ClientMessage, ServerMessage};

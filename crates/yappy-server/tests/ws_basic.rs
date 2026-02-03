@@ -1354,3 +1354,160 @@ async fn test_websocket_audio_done_statistics() {
 
     ws.close(None).await.ok();
 }
+
+// ============================================================================
+// Flush Timeout Tests (FR-013)
+// ============================================================================
+
+/// Start a test server with custom buffer configuration.
+async fn start_test_server_with_buffer_config(
+    registry: ProviderRegistry,
+    buffer_config: BufferConfigToml,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let config = Config {
+        server: ServerConfig::default(),
+        providers: ProvidersConfig {
+            default: "mock".to_string(),
+            openai: None,
+            kokoro: None,
+            avspeech: None,
+        },
+        buffer: buffer_config,
+    };
+
+    let state = AppState::new(config, registry);
+    let router = create_router(state);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    (addr, handle)
+}
+
+/// Test buffer flush timeout (FR-013).
+///
+/// Verifies that:
+/// 1. Text without a sentence boundary is held in the buffer
+/// 2. After the flush timeout, the buffer is flushed automatically
+/// 3. Audio is generated for the flushed text
+///
+/// This test uses a very short flush timeout (100ms) to avoid long waits.
+#[tokio::test]
+async fn test_websocket_flush_timeout() {
+    let registry = create_mock_registry();
+
+    // Use a short flush timeout for testing (100ms)
+    let buffer_config = BufferConfigToml {
+        flush_timeout_ms: 100,
+        max_size_bytes: 4096,
+    };
+
+    let (addr, _handle) = start_test_server_with_buffer_config(registry, buffer_config).await;
+
+    let mut ws = connect_ws(addr).await;
+
+    // Initialize session
+    let init_msg = ClientMessage::SessionInit {
+        provider: None,
+        voice: None,
+        audio_format: None,
+        code_block_mode: None,
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&init_msg).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+
+    // Receive session.ready
+    let response = timeout(TEST_TIMEOUT, ws.next())
+        .await
+        .expect("Timeout waiting for session.ready")
+        .expect("Stream closed")
+        .expect("WebSocket error");
+    assert!(
+        matches!(response, Message::Text(_)),
+        "Expected session.ready"
+    );
+
+    // Send text WITHOUT a sentence boundary (no period at the end)
+    // This text will be buffered and NOT immediately synthesized
+    let text_msg = ClientMessage::Text {
+        content: "This text has no sentence boundary".to_string(),
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&text_msg).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+
+    // Wait for the flush timeout to trigger (100ms configured + some margin)
+    // The buffer should automatically flush and generate audio
+    let response = timeout(Duration::from_millis(500), ws.next())
+        .await
+        .expect("Timeout waiting for flush timeout audio - buffer did not flush")
+        .expect("Stream closed")
+        .expect("WebSocket error");
+
+    // Should receive a binary audio frame from the timed-out buffer flush
+    assert!(
+        matches!(response, Message::Binary(_)),
+        "Expected binary audio frame from flush timeout, got: {response:?}"
+    );
+
+    // Verify the audio frame has correct format (12-byte header)
+    if let Message::Binary(data) = response {
+        assert!(
+            data.len() >= 12,
+            "Audio frame too short: {} bytes",
+            data.len()
+        );
+
+        // Parse header to verify it's a valid audio chunk
+        let sequence = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let sentence_index = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let duration_ms = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+
+        assert_eq!(sequence, 0, "First chunk should have sequence 0");
+        assert_eq!(sentence_index, 0, "First sentence should have index 0");
+        assert!(duration_ms > 0, "Duration should be positive");
+    }
+
+    // Now send text.done to complete the session
+    let done_msg = ClientMessage::TextDone;
+    ws.send(Message::Text(
+        serde_json::to_string(&done_msg).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+
+    // Receive audio.done
+    let response = timeout(TEST_TIMEOUT, ws.next())
+        .await
+        .expect("Timeout waiting for audio.done")
+        .expect("Stream closed")
+        .expect("WebSocket error");
+
+    if let Message::Text(text) = response {
+        let server_msg: ServerMessage = serde_json::from_str(&text).unwrap();
+        match server_msg {
+            ServerMessage::AudioDone {
+                total_sentences, ..
+            } => {
+                // 1 sentence (the one that was flushed by timeout)
+                assert_eq!(total_sentences, 1, "Expected 1 sentence from flush timeout");
+            }
+            _ => panic!("Expected AudioDone, got: {server_msg:?}"),
+        }
+    } else {
+        panic!("Expected text message for audio.done");
+    }
+
+    ws.close(None).await.ok();
+}
