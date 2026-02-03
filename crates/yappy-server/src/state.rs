@@ -14,6 +14,8 @@ use tracing::{debug, trace};
 use yappy_core::provider::ProviderId;
 use yappy_core::{Config, ProviderMetadata, ProviderStatus, TtsProvider};
 
+use crate::shutdown::ShutdownCoordinator;
+
 /// Registry holding all available TTS providers
 ///
 /// The registry maps provider IDs to their implementations and tracks
@@ -644,6 +646,7 @@ async fn register_kokoro_provider(
 /// - Provider registry for TTS synthesis
 /// - Configuration settings
 /// - Server start time for uptime tracking
+/// - Shutdown coordinator for graceful shutdown
 ///
 /// `AppState` is designed to be used with Axum's `State` extractor.
 /// It implements `Clone` cheaply via `Arc` for all its fields.
@@ -669,6 +672,8 @@ pub struct AppState {
     config: Arc<Config>,
     /// Server start time for uptime calculation
     start_time: Instant,
+    /// Shutdown coordinator for graceful shutdown (FR-027, SC-007)
+    shutdown: Arc<ShutdownCoordinator>,
 }
 
 impl AppState {
@@ -683,6 +688,30 @@ impl AppState {
             providers: Arc::new(providers),
             config: Arc::new(config),
             start_time: Instant::now(),
+            shutdown: Arc::new(ShutdownCoordinator::new()),
+        }
+    }
+
+    /// Create new application state with a custom shutdown coordinator
+    ///
+    /// This is useful for testing or when you need to share a shutdown
+    /// coordinator across multiple components.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Server configuration
+    /// * `providers` - Provider registry with registered TTS providers
+    /// * `shutdown` - Shutdown coordinator for graceful shutdown
+    pub fn with_shutdown_coordinator(
+        config: Config,
+        providers: ProviderRegistry,
+        shutdown: Arc<ShutdownCoordinator>,
+    ) -> Self {
+        Self {
+            providers: Arc::new(providers),
+            config: Arc::new(config),
+            start_time: Instant::now(),
+            shutdown,
         }
     }
 
@@ -700,6 +729,14 @@ impl AppState {
     pub fn config(&self) -> &Config {
         &self.config
     }
+
+    /// Get the shutdown coordinator
+    ///
+    /// Used by WebSocket handlers to register sessions and check for
+    /// shutdown signals.
+    pub const fn shutdown(&self) -> &Arc<ShutdownCoordinator> {
+        &self.shutdown
+    }
 }
 
 impl std::fmt::Debug for AppState {
@@ -708,6 +745,7 @@ impl std::fmt::Debug for AppState {
             .field("providers", &self.providers)
             .field("config", &"<Config>")
             .field("start_time", &self.start_time)
+            .field("shutdown", &self.shutdown)
             .finish()
     }
 }

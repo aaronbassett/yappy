@@ -66,6 +66,7 @@ use yappy_core::{
     VoiceConfig,
 };
 
+use crate::shutdown::SessionGuard;
 use crate::state::{AppState, ProviderRegistry};
 
 /// Default flush timeout when no session is active yet.
@@ -135,6 +136,7 @@ pub async fn ws_upgrade_handler(State(state): State<AppState>, ws: WebSocketUpgr
 ///
 /// This function manages the WebSocket message loop after the connection
 /// has been upgraded. It:
+/// - Registers with the shutdown coordinator for graceful shutdown
 /// - Splits the socket into sender and receiver halves
 /// - Tracks session state for the connection
 /// - Processes incoming messages (text and binary)
@@ -152,6 +154,15 @@ pub async fn ws_upgrade_handler(State(state): State<AppState>, ws: WebSocketUpgr
 /// created when the client sends a `session.init` message and remains active
 /// until the connection closes.
 ///
+/// # Graceful Shutdown (FR-027, SC-007)
+///
+/// When the server initiates shutdown:
+/// 1. The session's cancellation token is triggered
+/// 2. Current synthesis operations are cancelled cooperatively
+/// 3. Any remaining buffer content is flushed and synthesized
+/// 4. `audio.done` is sent to the client
+/// 5. Connection is closed cleanly
+///
 /// # Session Isolation (FR-018)
 ///
 /// This function creates all per-connection state as local variables, ensuring
@@ -159,6 +170,7 @@ pub async fn ws_upgrade_handler(State(state): State<AppState>, ws: WebSocketUpgr
 ///
 /// - `session: Option<Session>` - Stack-local, unique per connection
 /// - `bp_sender: BackpressureSender` - Owns its own semaphore and metrics
+/// - `session_guard: SessionGuard` - Tracks this session with shutdown coordinator
 ///
 /// The `state` parameter provides shared read-only access to providers via
 /// `Arc<ProviderRegistry>`. Provider methods take `&self` and never mutate
@@ -171,9 +183,14 @@ pub async fn ws_upgrade_handler(State(state): State<AppState>, ws: WebSocketUpgr
 /// - Audio format: Stored in session, not shared
 /// - Sequence numbers: Maintained per-session in [`Session::audio_sequence`]
 /// - Statistics: Accumulated per-session in [`Session::total_duration_ms`] and [`Session::total_bytes`]
+#[allow(clippy::too_many_lines)]
 #[instrument(name = "ws_connection", skip_all, fields(remote_addr))]
 async fn handle_socket(socket: WebSocket, state: AppState) {
     info!("WebSocket connection established");
+
+    // Register with the shutdown coordinator for graceful shutdown tracking (FR-027)
+    // The guard automatically unregisters when dropped
+    let session_guard = state.shutdown().register_session();
 
     // Get audio channel capacity from config (for backpressure)
     let audio_channel_capacity = state.config().server.audio_channel_capacity;
@@ -191,8 +208,20 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // Session state for this connection (None until session.init is received)
     let mut session: Option<Session> = None;
 
+    // Get the shutdown token for monitoring - we hold this for the lifetime of the connection
+    let shutdown_token = session_guard.token();
+
     // Process incoming messages with flush timeout support
     loop {
+        // Check if shutdown was requested - if so, initiate graceful close
+        if session_guard.is_shutting_down() {
+            info!("Server shutdown requested, initiating graceful session close");
+            if let Err(e) = handle_graceful_shutdown(&mut session, &mut bp_sender, state.providers()).await {
+                warn!(error = %e, "Error during graceful shutdown");
+            }
+            break;
+        }
+
         // Determine the flush timeout duration based on session state.
         // If we have a session with content in the buffer, use its configured timeout.
         // Otherwise, use a longer timeout (effectively just waiting for messages).
@@ -202,12 +231,28 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             .map_or(DEFAULT_FLUSH_TIMEOUT, |s| s.buffer.flush_timeout());
 
         tokio::select! {
+            // Check for shutdown signal
+            () = shutdown_token.cancelled() => {
+                info!("Received shutdown signal, initiating graceful session close");
+                if let Err(e) = handle_graceful_shutdown(&mut session, &mut bp_sender, state.providers()).await {
+                    warn!(error = %e, "Error during graceful shutdown");
+                }
+                break;
+            }
+
             // Wait for the next WebSocket message
             result = receiver.next() => {
                 match result {
                     Some(Ok(message)) => {
                         let buffer_config: BufferConfig = state.config().buffer.clone().into();
-                        if !process_message(message, &mut bp_sender, &mut session, state.providers(), &buffer_config).await {
+                        if !process_message_with_cancellation(
+                            message,
+                            &mut bp_sender,
+                            &mut session,
+                            state.providers(),
+                            &buffer_config,
+                            &session_guard,
+                        ).await {
                             // Connection should be closed
                             break;
                         }
@@ -236,13 +281,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 "Flushed buffer due to timeout (no sentence boundary detected)"
                             );
 
-                            // Synthesize the flushed sentence
+                            // Synthesize the flushed sentence with cancellation support
                             if let Some(provider) = state.providers().get(&session.provider_id) {
-                                if !synthesize_and_stream(
+                                if !synthesize_and_stream_with_cancellation(
                                     vec![sentence],
                                     session,
                                     &mut bp_sender,
                                     provider.as_ref(),
+                                    &session_guard,
                                 )
                                 .await
                                 {
@@ -281,6 +327,115 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     } else {
         info!("WebSocket connection closed (no session)");
     }
+
+    // session_guard is dropped here, unregistering from the shutdown coordinator
+}
+
+/// Handle graceful shutdown for an active session.
+///
+/// This function is called when the server initiates shutdown. It:
+/// 1. Flushes any remaining buffer content
+/// 2. Sends `audio.done` to the client
+/// 3. Transitions the session to Closed state
+///
+/// # Arguments
+///
+/// * `session` - The current session (may be None if not initialized)
+/// * `sender` - The backpressure sender for sending messages
+/// * `providers` - The provider registry
+///
+/// # Returns
+///
+/// Returns `Ok(())` if shutdown was handled successfully, or an error string on failure.
+async fn handle_graceful_shutdown<S>(
+    session: &mut Option<Session>,
+    sender: &mut BackpressureSender<S>,
+    providers: &ProviderRegistry,
+) -> Result<(), String>
+where
+    S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let Some(session) = session.as_mut() else {
+        // No active session, nothing to do
+        debug!("No active session during graceful shutdown");
+        return Ok(());
+    };
+
+    // Skip if already closed
+    if session.state == SessionState::Closed {
+        return Ok(());
+    }
+
+    debug!(
+        session_id = %session.id,
+        "Performing graceful shutdown for session"
+    );
+
+    // Flush any remaining buffer content
+    if let Some(sentence) = session.buffer.flush() {
+        debug!(
+            session_id = %session.id,
+            sentence_index = sentence.index,
+            "Flushing remaining buffer content during shutdown"
+        );
+
+        // Try to synthesize the flushed content (best effort during shutdown)
+        if let Some(provider) = providers.get(&session.provider_id) {
+            // Use a fresh cancellation token - we want to complete this synthesis
+            // even though we're shutting down (graceful completion)
+            let cancel_token = CancellationToken::new();
+
+            if let Ok(mut audio_stream) = provider
+                .synthesize(
+                    &sentence.text,
+                    &session.voice,
+                    session.audio_format.clone(),
+                    cancel_token,
+                )
+                .await
+            {
+                // Stream the audio chunks
+                while let Some(chunk_result) = audio_stream.next().await {
+                    if let Ok(mut chunk) = chunk_result {
+                        chunk.sequence =
+                            session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
+                        chunk.sentence_index = sentence.index;
+
+                        let frame = chunk.to_binary_frame();
+                        if sender.send_binary(frame.to_vec()).await.is_err() {
+                            // Connection may have closed, break out
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Get total statistics
+    let total_sentences = session.buffer.sentence_index();
+
+    // Send audio.done
+    let response = ServerMessage::audio_done(
+        total_sentences,
+        session.total_duration_ms,
+        session.total_bytes,
+    );
+    send_server_message(sender.inner_mut(), &response).await?;
+
+    // Mark session as closed
+    session.state = SessionState::Closed;
+
+    info!(
+        session_id = %session.id,
+        total_sentences = total_sentences,
+        total_duration_ms = session.total_duration_ms,
+        total_bytes = session.total_bytes,
+        "Session closed during graceful shutdown"
+    );
+
+    Ok(())
 }
 
 /// Process a single WebSocket message.
@@ -304,6 +459,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 /// * `session` - Mutable reference to the current session state
 /// * `providers` - Reference to the provider registry
 /// * `buffer_config` - Buffer configuration for new sessions
+#[cfg_attr(not(test), allow(dead_code))]
 async fn process_message<S>(
     message: Message,
     sender: &mut BackpressureSender<S>,
@@ -356,6 +512,7 @@ where
 ///
 /// Returns `true` to continue the message loop, `false` on fatal errors.
 #[allow(clippy::too_many_lines)]
+#[cfg_attr(not(test), allow(dead_code))]
 async fn handle_text_message<S>(
     text: &str,
     sender: &mut BackpressureSender<S>,
@@ -889,6 +1046,7 @@ where
 /// This function implements FR-020 backpressure. When the bounded audio channel
 /// is full (client is slow consuming audio), the synthesis will pause until
 /// the channel has capacity. This prevents unbounded memory growth.
+#[cfg_attr(not(test), allow(dead_code))]
 async fn synthesize_and_stream<S>(
     sentences: Vec<Sentence>,
     session: &mut Session,
@@ -990,6 +1148,412 @@ where
                         return false;
                     }
                     // Break out of chunk streaming, continue to next sentence
+                    break;
+                }
+            }
+        }
+
+        debug!(
+            session_id = %session.id,
+            sentence_index = sentence.index,
+            "Completed synthesis for sentence"
+        );
+    }
+
+    true
+}
+
+/// Process a single WebSocket message with cancellation support.
+///
+/// This is a wrapper around message handling that passes the session guard
+/// for cancellation token propagation to synthesis operations.
+///
+/// # Arguments
+///
+/// * `message` - The received WebSocket message
+/// * `sender` - Mutable reference to the backpressure sender for responses
+/// * `session` - Mutable reference to the current session state
+/// * `providers` - Reference to the provider registry
+/// * `buffer_config` - Buffer configuration for new sessions
+/// * `session_guard` - Session guard for accessing cancellation tokens
+async fn process_message_with_cancellation<S>(
+    message: Message,
+    sender: &mut BackpressureSender<S>,
+    session: &mut Option<Session>,
+    providers: &ProviderRegistry,
+    buffer_config: &BufferConfig,
+    session_guard: &SessionGuard,
+) -> bool
+where
+    S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    match message {
+        Message::Text(text) => {
+            handle_text_message_with_cancellation(
+                &text,
+                sender,
+                session,
+                providers,
+                buffer_config,
+                session_guard,
+            )
+            .await
+        }
+        Message::Binary(data) => handle_binary_message(&data, sender.inner_mut()).await,
+        Message::Ping(_) => {
+            debug!("Received ping");
+            true
+        }
+        Message::Pong(_) => {
+            debug!("Received pong");
+            true
+        }
+        Message::Close(frame) => {
+            if let Some(cf) = &frame {
+                info!(code = %cf.code, "Received close frame");
+            } else {
+                info!("Received close frame (no reason)");
+            }
+            false
+        }
+    }
+}
+
+/// Handle a text WebSocket frame with cancellation support.
+///
+/// Similar to `handle_text_message` but propagates the session guard
+/// to synthesis operations for graceful shutdown support.
+#[allow(clippy::too_many_lines)]
+async fn handle_text_message_with_cancellation<S>(
+    text: &str,
+    sender: &mut BackpressureSender<S>,
+    session: &mut Option<Session>,
+    providers: &ProviderRegistry,
+    buffer_config: &BufferConfig,
+    session_guard: &SessionGuard,
+) -> bool
+where
+    S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    match serde_json::from_str::<ClientMessage>(text) {
+        Ok(client_msg) => match client_msg {
+            ClientMessage::SessionInit {
+                provider,
+                voice,
+                audio_format,
+                code_block_mode,
+            } => {
+                debug!(
+                    message_type = "session.init",
+                    provider = provider.as_deref().unwrap_or("default"),
+                    "Received client message"
+                );
+
+                handle_session_init(
+                    sender.inner_mut(),
+                    session,
+                    providers,
+                    provider,
+                    voice,
+                    audio_format,
+                    code_block_mode,
+                    buffer_config,
+                )
+                .await
+            }
+            ClientMessage::Text { content } => {
+                debug!(message_type = "text", "Received client message");
+
+                let Some(session) = session.as_mut() else {
+                    let response = ServerMessage::error(
+                        "no_session",
+                        "No active session - send session.init first",
+                    );
+                    if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                        warn!("Failed to send response: {}", err);
+                        return false;
+                    }
+                    return true;
+                };
+
+                session.touch();
+
+                if session.state == SessionState::Ready {
+                    session.state = SessionState::Streaming;
+                    debug!(
+                        session_id = %session.id,
+                        "Session transitioned to Streaming state"
+                    );
+                }
+
+                let sentences = session.buffer.push(&content);
+
+                if !sentences.is_empty() {
+                    debug!(
+                        session_id = %session.id,
+                        sentence_count = sentences.len(),
+                        "Extracted sentences from buffer"
+                    );
+
+                    if let Some(provider) = providers.get(&session.provider_id) {
+                        if !synthesize_and_stream_with_cancellation(
+                            sentences,
+                            session,
+                            sender,
+                            provider.as_ref(),
+                            session_guard,
+                        )
+                        .await
+                        {
+                            return false;
+                        }
+                    } else {
+                        warn!(
+                            session_id = %session.id,
+                            provider_id = %session.provider_id,
+                            "Provider not found during synthesis"
+                        );
+                        let response = ServerMessage::error(
+                            "provider_gone",
+                            "TTS provider is no longer available",
+                        );
+                        if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                            warn!("Failed to send error: {}", err);
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            }
+            ClientMessage::TextDone => {
+                debug!(message_type = "text.done", "Received client message");
+
+                let Some(session) = session.as_mut() else {
+                    let response = ServerMessage::error(
+                        "no_session",
+                        "No active session - send session.init first",
+                    );
+                    if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                        warn!("Failed to send response: {}", err);
+                        return false;
+                    }
+                    return true;
+                };
+
+                session.state = SessionState::Completing;
+                debug!(
+                    session_id = %session.id,
+                    "Session transitioned to Completing state"
+                );
+
+                if let Some(sentence) = session.buffer.flush() {
+                    debug!(
+                        session_id = %session.id,
+                        sentence_index = sentence.index,
+                        "Flushed remaining buffer content"
+                    );
+
+                    if let Some(provider) = providers.get(&session.provider_id) {
+                        if !synthesize_and_stream_with_cancellation(
+                            vec![sentence],
+                            session,
+                            sender,
+                            provider.as_ref(),
+                            session_guard,
+                        )
+                        .await
+                        {
+                            return false;
+                        }
+                    } else {
+                        warn!(
+                            session_id = %session.id,
+                            provider_id = %session.provider_id,
+                            "Provider not found during flush synthesis"
+                        );
+                    }
+                }
+
+                let total_sentences = session.buffer.sentence_index();
+
+                let response = ServerMessage::audio_done(
+                    total_sentences,
+                    session.total_duration_ms,
+                    session.total_bytes,
+                );
+                if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                    warn!("Failed to send audio.done: {}", err);
+                    return false;
+                }
+
+                session.state = SessionState::Closed;
+                debug!(
+                    session_id = %session.id,
+                    total_sentences = total_sentences,
+                    total_duration_ms = session.total_duration_ms,
+                    total_bytes = session.total_bytes,
+                    "Session completed and closed"
+                );
+
+                true
+            }
+        },
+        Err(err) => {
+            warn!(error = %err, "Failed to parse client message");
+
+            let response =
+                ServerMessage::error("invalid_message", "Failed to parse message as valid JSON");
+            if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
+                warn!("Failed to send error response: {}", send_err);
+                return false;
+            }
+            true
+        }
+    }
+}
+
+/// Synthesize sentences with cancellation token propagation (FR-027).
+///
+/// Similar to `synthesize_and_stream` but uses the session guard's cancellation
+/// token to support graceful shutdown. When shutdown is initiated, ongoing
+/// synthesis operations receive a cancellation signal and should stop within
+/// 5 seconds (per FR-027).
+///
+/// # Arguments
+///
+/// * `sentences` - Sentences to synthesize
+/// * `session` - Mutable reference to update statistics
+/// * `sender` - WebSocket sender for streaming audio frames
+/// * `provider` - The TTS provider to use for synthesis
+/// * `session_guard` - Session guard providing cancellation tokens
+///
+/// # Returns
+///
+/// Returns `true` if all sentences were processed, `false` on fatal error.
+#[allow(clippy::too_many_lines)]
+async fn synthesize_and_stream_with_cancellation<S>(
+    sentences: Vec<Sentence>,
+    session: &mut Session,
+    sender: &mut BackpressureSender<S>,
+    provider: &dyn TtsProvider,
+    session_guard: &SessionGuard,
+) -> bool
+where
+    S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    for sentence in sentences {
+        // Check for shutdown before starting each sentence
+        if session_guard.is_shutting_down() {
+            debug!(
+                session_id = %session.id,
+                sentence_index = sentence.index,
+                "Skipping sentence synthesis due to shutdown"
+            );
+            return true; // Return true to allow graceful shutdown handler to run
+        }
+
+        debug!(
+            session_id = %session.id,
+            sentence_index = sentence.index,
+            "Starting synthesis for sentence"
+        );
+
+        // Create a child cancellation token that will be cancelled on shutdown
+        let cancel_token = session_guard.child_token();
+
+        let audio_stream = match provider
+            .synthesize(
+                &sentence.text,
+                &session.voice,
+                session.audio_format.clone(),
+                cancel_token.clone(),
+            )
+            .await
+        {
+            Ok(stream) => stream,
+            Err(err) => {
+                // Check if this was due to cancellation
+                if cancel_token.is_cancelled() {
+                    debug!(
+                        session_id = %session.id,
+                        sentence_index = sentence.index,
+                        "Synthesis cancelled due to shutdown"
+                    );
+                    return true;
+                }
+
+                warn!(
+                    session_id = %session.id,
+                    sentence_index = sentence.index,
+                    error_code = err.code(),
+                    "Synthesis failed for sentence"
+                );
+
+                let response =
+                    ServerMessage::error_with_sentence(err.code(), err.to_string(), sentence.index);
+                if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
+                    warn!("Failed to send synthesis error: {}", send_err);
+                    return false;
+                }
+                continue;
+            }
+        };
+
+        let mut audio_stream = audio_stream;
+        while let Some(chunk_result) = audio_stream.next().await {
+            // Check for cancellation during streaming
+            if cancel_token.is_cancelled() {
+                debug!(
+                    session_id = %session.id,
+                    sentence_index = sentence.index,
+                    "Audio streaming cancelled due to shutdown"
+                );
+                return true;
+            }
+
+            match chunk_result {
+                Ok(mut chunk) => {
+                    chunk.sequence =
+                        session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
+                    chunk.sentence_index = sentence.index;
+
+                    debug!(
+                        session_id = %session.id,
+                        sequence = chunk.sequence,
+                        sentence_index = chunk.sentence_index,
+                        bytes = chunk.data.len(),
+                        duration_ms = chunk.duration_ms,
+                        "Sending audio chunk"
+                    );
+
+                    let frame = chunk.to_binary_frame();
+                    if let Err(err) = sender.send_binary(frame.to_vec()).await {
+                        warn!("Failed to send audio chunk: {}", err);
+                        return false;
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        session_id = %session.id,
+                        sentence_index = sentence.index,
+                        error_code = err.code(),
+                        "Audio stream error for sentence"
+                    );
+
+                    let response = ServerMessage::error_with_sentence(
+                        err.code(),
+                        err.to_string(),
+                        sentence.index,
+                    );
+                    if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await
+                    {
+                        warn!("Failed to send stream error: {}", send_err);
+                        return false;
+                    }
                     break;
                 }
             }

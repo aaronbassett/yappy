@@ -7,10 +7,12 @@
 
 pub mod app;
 pub mod handlers;
+pub mod shutdown;
 pub mod state;
 pub mod ws;
 
 pub use app::create_router;
 pub use handlers::list_providers;
+pub use shutdown::{ShutdownCoordinator, SessionGuard};
 pub use state::{AppState, ProviderRegistry};
 pub use ws::ws_upgrade_handler;
