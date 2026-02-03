@@ -20,7 +20,9 @@
 //! Per project requirements, text content is never logged. Only metadata such as
 //! message types, frame sizes, and connection events are recorded.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{
@@ -31,7 +33,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument, trace, warn};
 use yappy_core::audio::AudioCodec;
 use yappy_core::buffer::{BufferConfig, Sentence};
 use yappy_core::provider::ProviderId;
@@ -46,6 +48,36 @@ use crate::state::{AppState, ProviderRegistry};
 /// Default flush timeout when no session is active yet.
 /// This is only used before session.init is received.
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Metrics for tracking backpressure events during a session.
+#[derive(Debug, Default)]
+struct BackpressureMetrics {
+    /// Number of times backpressure was applied (channel was full)
+    backpressure_events: AtomicU64,
+    /// Total milliseconds spent waiting due to backpressure
+    total_backpressure_ms: AtomicU64,
+}
+
+impl BackpressureMetrics {
+    /// Record a backpressure event with its duration.
+    #[allow(clippy::cast_possible_truncation)]
+    fn record_backpressure(&self, duration: Duration) {
+        self.backpressure_events.fetch_add(1, Ordering::Relaxed);
+        // Truncation is acceptable here - backpressure durations won't exceed u64::MAX ms
+        self.total_backpressure_ms
+            .fetch_add(duration.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// Get the number of backpressure events.
+    fn event_count(&self) -> u64 {
+        self.backpressure_events.load(Ordering::Relaxed)
+    }
+
+    /// Get the total time spent in backpressure.
+    fn total_time_ms(&self) -> u64 {
+        self.total_backpressure_ms.load(Ordering::Relaxed)
+    }
+}
 
 /// WebSocket upgrade handler for the `/ws` endpoint.
 ///
@@ -100,8 +132,18 @@ pub async fn ws_upgrade_handler(State(state): State<AppState>, ws: WebSocketUpgr
 async fn handle_socket(socket: WebSocket, state: AppState) {
     info!("WebSocket connection established");
 
+    // Get audio channel capacity from config (for backpressure)
+    let audio_channel_capacity = state.config().server.audio_channel_capacity;
+    debug!(
+        audio_channel_capacity,
+        "Configuring backpressure with bounded channel"
+    );
+
     // Split the socket into sender and receiver for independent handling
-    let (mut sender, mut receiver) = socket.split();
+    let (sender, mut receiver) = socket.split();
+
+    // Wrap sender with backpressure control
+    let mut bp_sender = BackpressureSender::new(sender, audio_channel_capacity);
 
     // Session state for this connection (None until session.init is received)
     let mut session: Option<Session> = None;
@@ -122,7 +164,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 match result {
                     Some(Ok(message)) => {
                         let buffer_config: BufferConfig = state.config().buffer.clone().into();
-                        if !process_message(message, &mut sender, &mut session, state.providers(), &buffer_config).await {
+                        if !process_message(message, &mut bp_sender, &mut session, state.providers(), &buffer_config).await {
                             // Connection should be closed
                             break;
                         }
@@ -156,7 +198,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 if !synthesize_and_stream(
                                     vec![sentence],
                                     session,
-                                    &mut sender,
+                                    &mut bp_sender,
                                     provider.as_ref(),
                                 )
                                 .await
@@ -178,8 +220,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     }
 
+    // Log backpressure metrics at session close
+    let bp_events = bp_sender.metrics().event_count();
+    let bp_total_ms = bp_sender.metrics().total_time_ms();
+
     if let Some(ref s) = session {
-        info!(session_id = %s.id, "WebSocket connection closed");
+        if bp_events > 0 {
+            info!(
+                session_id = %s.id,
+                backpressure_events = bp_events,
+                backpressure_total_ms = bp_total_ms,
+                "WebSocket connection closed (backpressure was applied)"
+            );
+        } else {
+            info!(session_id = %s.id, "WebSocket connection closed");
+        }
     } else {
         info!("WebSocket connection closed (no session)");
     }
@@ -202,13 +257,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 /// # Arguments
 ///
 /// * `message` - The received WebSocket message
-/// * `sender` - Mutable reference to the sender half for responses
+/// * `sender` - Mutable reference to the backpressure sender for responses
 /// * `session` - Mutable reference to the current session state
 /// * `providers` - Reference to the provider registry
 /// * `buffer_config` - Buffer configuration for new sessions
 async fn process_message<S>(
     message: Message,
-    sender: &mut S,
+    sender: &mut BackpressureSender<S>,
     session: &mut Option<Session>,
     providers: &ProviderRegistry,
     buffer_config: &BufferConfig,
@@ -221,7 +276,7 @@ where
         Message::Text(text) => {
             handle_text_message(&text, sender, session, providers, buffer_config).await
         }
-        Message::Binary(data) => handle_binary_message(&data, sender).await,
+        Message::Binary(data) => handle_binary_message(&data, sender.inner_mut()).await,
         Message::Ping(_) => {
             // Axum automatically responds to pings with pongs
             debug!("Received ping");
@@ -260,7 +315,7 @@ where
 #[allow(clippy::too_many_lines)]
 async fn handle_text_message<S>(
     text: &str,
-    sender: &mut S,
+    sender: &mut BackpressureSender<S>,
     session: &mut Option<Session>,
     providers: &ProviderRegistry,
     buffer_config: &BufferConfig,
@@ -287,7 +342,7 @@ where
                     );
 
                     handle_session_init(
-                        sender,
+                        sender.inner_mut(),
                         session,
                         providers,
                         provider,
@@ -307,7 +362,7 @@ where
                             "no_session",
                             "No active session - send session.init first",
                         );
-                        if let Err(err) = send_server_message(sender, &response).await {
+                        if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
                             warn!("Failed to send response: {}", err);
                             return false;
                         }
@@ -339,7 +394,7 @@ where
 
                         // Get the provider for synthesis
                         if let Some(provider) = providers.get(&session.provider_id) {
-                            // Synthesize sentences and stream audio to WebSocket
+                            // Synthesize sentences and stream audio to WebSocket with backpressure
                             if !synthesize_and_stream(sentences, session, sender, provider.as_ref())
                                 .await
                             {
@@ -357,7 +412,9 @@ where
                                 "provider_gone",
                                 "TTS provider is no longer available",
                             );
-                            if let Err(err) = send_server_message(sender, &response).await {
+                            if let Err(err) =
+                                send_server_message(sender.inner_mut(), &response).await
+                            {
                                 warn!("Failed to send error: {}", err);
                                 return false;
                             }
@@ -375,7 +432,7 @@ where
                             "no_session",
                             "No active session - send session.init first",
                         );
-                        if let Err(err) = send_server_message(sender, &response).await {
+                        if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
                             warn!("Failed to send response: {}", err);
                             return false;
                         }
@@ -429,7 +486,7 @@ where
                         session.total_duration_ms,
                         session.total_bytes,
                     );
-                    if let Err(err) = send_server_message(sender, &response).await {
+                    if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
                         warn!("Failed to send audio.done: {}", err);
                         return false;
                     }
@@ -454,7 +511,7 @@ where
 
             let response =
                 ServerMessage::error("invalid_message", "Failed to parse message as valid JSON");
-            if let Err(send_err) = send_server_message(sender, &response).await {
+            if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
                 warn!("Failed to send error response: {}", send_err);
                 return false;
             }
@@ -758,10 +815,16 @@ where
 ///
 /// Sentence text is never logged. Only metadata like sentence index and
 /// chunk sizes are recorded for observability.
+///
+/// # Backpressure
+///
+/// This function implements FR-020 backpressure. When the bounded audio channel
+/// is full (client is slow consuming audio), the synthesis will pause until
+/// the channel has capacity. This prevents unbounded memory growth.
 async fn synthesize_and_stream<S>(
     sentences: Vec<Sentence>,
     session: &mut Session,
-    sender: &mut S,
+    sender: &mut BackpressureSender<S>,
     provider: &dyn TtsProvider,
 ) -> bool
 where
@@ -801,7 +864,7 @@ where
 
                 let response =
                     ServerMessage::error_with_sentence(err.code(), err.to_string(), sentence.index);
-                if let Err(send_err) = send_server_message(sender, &response).await {
+                if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
                     warn!("Failed to send synthesis error: {}", send_err);
                     return false;
                 }
@@ -810,7 +873,7 @@ where
             }
         };
 
-        // Stream audio chunks to WebSocket
+        // Stream audio chunks to WebSocket with backpressure control
         let mut audio_stream = audio_stream;
         while let Some(chunk_result) = audio_stream.next().await {
             match chunk_result {
@@ -831,9 +894,10 @@ where
                         "Sending audio chunk"
                     );
 
-                    // Serialize chunk to binary frame and send
+                    // Serialize chunk to binary frame and send with backpressure
+                    // This will block if the channel is at capacity (FR-020)
                     let frame = chunk.to_binary_frame();
-                    if let Err(err) = sender.send(Message::Binary(frame.to_vec().into())).await {
+                    if let Err(err) = sender.send_binary(frame.to_vec()).await {
                         warn!("Failed to send audio chunk: {}", err);
                         return false;
                     }
@@ -852,7 +916,8 @@ where
                         err.to_string(),
                         sentence.index,
                     );
-                    if let Err(send_err) = send_server_message(sender, &response).await {
+                    if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await
+                    {
                         warn!("Failed to send stream error: {}", send_err);
                         return false;
                     }
@@ -923,6 +988,146 @@ where
         .send(Message::Text(json.into()))
         .await
         .map_err(|e| format!("Send failed: {e}"))
+}
+
+/// A wrapper around a WebSocket sender that implements bounded backpressure.
+///
+/// This struct uses a semaphore to limit the number of in-flight frames.
+/// When the limit is reached, sends will block until a permit is released,
+/// naturally applying backpressure to the synthesis pipeline.
+///
+/// # Backpressure Mechanism
+///
+/// The backpressure works as follows:
+/// 1. Before sending a frame, acquire a permit from the semaphore
+/// 2. If no permits are available, the acquire will block (backpressure applied)
+/// 3. After the frame is sent successfully, the permit is released
+///
+/// This ensures that at most `capacity` frames are "in flight" between
+/// synthesis and the client consuming them.
+struct BackpressureSender<S> {
+    /// The underlying sender (WebSocket sink)
+    sender: S,
+    /// Semaphore to limit in-flight frames
+    semaphore: Arc<tokio::sync::Semaphore>,
+    /// Metrics for tracking backpressure events
+    metrics: Arc<BackpressureMetrics>,
+    /// Session ID for logging (optional, for context)
+    session_id: Option<String>,
+    /// Channel capacity for logging
+    capacity: usize,
+}
+
+impl<S> BackpressureSender<S>
+where
+    S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    /// Create a new backpressure sender with the given capacity.
+    ///
+    /// # Arguments
+    ///
+    /// * `sender` - The underlying WebSocket sender
+    /// * `capacity` - Maximum number of in-flight frames (32-64 recommended)
+    fn new(sender: S, capacity: usize) -> Self {
+        Self {
+            sender,
+            semaphore: Arc::new(tokio::sync::Semaphore::new(capacity)),
+            metrics: Arc::new(BackpressureMetrics::default()),
+            session_id: None,
+            capacity,
+        }
+    }
+
+    /// Set the session ID for logging context.
+    #[allow(dead_code)]
+    fn with_session_id(mut self, session_id: String) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
+    /// Get the backpressure metrics.
+    fn metrics(&self) -> &BackpressureMetrics {
+        &self.metrics
+    }
+
+    /// Send a binary frame with backpressure control.
+    ///
+    /// This method will block if the channel is at capacity, applying
+    /// backpressure to the synthesis pipeline.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the frame was sent successfully, or an error string
+    /// if sending failed.
+    #[allow(clippy::cast_possible_truncation)]
+    async fn send_binary(&mut self, data: Vec<u8>) -> Result<(), String> {
+        let start = Instant::now();
+
+        // Try to acquire a permit immediately - use if let with else for the backpressure path
+        let permit = if let Ok(permit) = self.semaphore.clone().try_acquire_owned() {
+            permit
+        } else {
+            // Channel is at capacity - log and wait for permit (backpressure)
+            trace!(
+                session_id = self.session_id.as_deref().unwrap_or("unknown"),
+                capacity = self.capacity,
+                "Backpressure: channel at capacity, waiting for permit"
+            );
+
+            // Block until a permit is available
+            match self.semaphore.clone().acquire_owned().await {
+                Ok(permit) => {
+                    let wait_duration = start.elapsed();
+                    self.metrics.record_backpressure(wait_duration);
+
+                    // Truncation is acceptable - wait times won't exceed u64::MAX ms
+                    debug!(
+                        session_id = self.session_id.as_deref().unwrap_or("unknown"),
+                        wait_ms = wait_duration.as_millis() as u64,
+                        total_backpressure_events = self.metrics.event_count(),
+                        "Backpressure: resumed after waiting"
+                    );
+                    permit
+                }
+                Err(e) => {
+                    return Err(format!("Semaphore closed: {e}"));
+                }
+            }
+        };
+
+        // Send the binary frame
+        let result = self
+            .sender
+            .send(Message::Binary(data.into()))
+            .await
+            .map_err(|e| format!("Send failed: {e}"));
+
+        // Release the permit after sending (even on error, to avoid deadlock)
+        drop(permit);
+
+        result
+    }
+
+    /// Send a text (JSON) message.
+    ///
+    /// Control messages bypass the backpressure mechanism to ensure
+    /// timely delivery of error messages and session state updates.
+    #[allow(dead_code)]
+    async fn send_text(&mut self, json: String) -> Result<(), String> {
+        self.sender
+            .send(Message::Text(json.into()))
+            .await
+            .map_err(|e| format!("Send failed: {e}"))
+    }
+
+    /// Get a mutable reference to the underlying sender.
+    ///
+    /// This is used for operations that need direct access to the sender,
+    /// such as sending messages before the session is initialized.
+    fn inner_mut(&mut self) -> &mut S {
+        &mut self.sender
+    }
 }
 
 /// Negotiate audio format based on provider capabilities and transcoding.
@@ -1047,6 +1252,42 @@ mod tests {
             _cx: &mut Context<'_>,
         ) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Default capacity for backpressure in tests
+    const TEST_BACKPRESSURE_CAPACITY: usize = 32;
+
+    /// Wrapper for BackpressureSender that provides convenient access to messages for testing.
+    struct TestSender {
+        bp_sender: BackpressureSender<MockSink>,
+    }
+
+    impl TestSender {
+        fn new() -> Self {
+            Self {
+                bp_sender: BackpressureSender::new(MockSink::new(), TEST_BACKPRESSURE_CAPACITY),
+            }
+        }
+
+        /// Get a mutable reference to the backpressure sender for passing to handler functions.
+        fn as_bp_sender(&mut self) -> &mut BackpressureSender<MockSink> {
+            &mut self.bp_sender
+        }
+
+        /// Get access to the messages sent.
+        fn messages(&self) -> &Vec<Message> {
+            &self.bp_sender.sender.messages
+        }
+
+        /// Clear the messages for subsequent test steps.
+        fn clear_messages(&mut self) {
+            self.bp_sender.sender.messages.clear();
+        }
+
+        /// Get backpressure metrics for assertions.
+        fn backpressure_events(&self) -> u64 {
+            self.bp_sender.metrics().event_count()
         }
     }
 
@@ -1255,14 +1496,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_success_with_default_provider() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
         let text = r#"{"type":"session.init"}"#;
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1271,10 +1512,10 @@ mod tests {
 
         assert!(should_continue);
         assert!(session.is_some());
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
         // Verify it's a session.ready response
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionReady {
@@ -1295,14 +1536,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_success_with_specified_provider() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
         let text = r#"{"type":"session.init","provider":"test"}"#;
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1316,14 +1557,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_success_with_valid_voice() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_voices();
         let text = r#"{"type":"session.init","voice":{"id":"voice_alice","speed":1.5}}"#;
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1338,7 +1579,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_success_with_voice_parameters_at_bounds() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_voices();
         // Test with voice parameters at valid boundary values
@@ -1346,7 +1587,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1364,14 +1605,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_no_providers() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_empty_registry();
         let text = r#"{"type":"session.init"}"#;
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1381,9 +1622,9 @@ mod tests {
         // Should return false (fatal error)
         assert!(!should_continue);
         assert!(session.is_none());
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError { code, .. } => {
@@ -1398,14 +1639,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_provider_not_found() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
         let text = r#"{"type":"session.init","provider":"nonexistent"}"#;
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1415,9 +1656,9 @@ mod tests {
         // Should return false (fatal error)
         assert!(!should_continue);
         assert!(session.is_none());
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError {
@@ -1438,7 +1679,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_provider_unavailable() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let mut registry = ProviderRegistry::new();
         registry.register(MockProvider::unavailable(
@@ -1453,7 +1694,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1463,7 +1704,7 @@ mod tests {
         assert!(!should_continue);
         assert!(session.is_none());
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError {
@@ -1484,7 +1725,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_already_initialized() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let registry = create_test_registry();
 
         // First init
@@ -1492,7 +1733,7 @@ mod tests {
         let text = r#"{"type":"session.init"}"#;
         let _ = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1501,12 +1742,12 @@ mod tests {
         assert!(session.is_some());
 
         // Clear sink for second message
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Second init should fail
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1515,9 +1756,9 @@ mod tests {
 
         // Should return true (not fatal, just ignored)
         assert!(should_continue);
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::Error { code, .. } => {
@@ -1532,14 +1773,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_invalid_voice() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_voices();
         let text = r#"{"type":"session.init","voice":{"id":"nonexistent_voice"}}"#;
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1549,9 +1790,9 @@ mod tests {
         // Should return false (fatal error)
         assert!(!should_continue);
         assert!(session.is_none());
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError {
@@ -1577,7 +1818,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_invalid_voice_speed_too_low() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_voices();
         // Speed below valid range (0.5 - 2.0)
@@ -1585,7 +1826,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1595,9 +1836,9 @@ mod tests {
         // Should return false (fatal error)
         assert!(!should_continue);
         assert!(session.is_none());
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError { code, message, .. } => {
@@ -1613,7 +1854,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_invalid_voice_speed_too_high() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_voices();
         // Speed above valid range (0.5 - 2.0)
@@ -1621,7 +1862,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1631,9 +1872,9 @@ mod tests {
         // Should return false (fatal error)
         assert!(!should_continue);
         assert!(session.is_none());
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError { code, message, .. } => {
@@ -1649,7 +1890,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_invalid_voice_pitch_out_of_range() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_voices();
         // Pitch outside valid range (-1.0 to 1.0)
@@ -1657,7 +1898,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1667,9 +1908,9 @@ mod tests {
         // Should return false (fatal error)
         assert!(!should_continue);
         assert!(session.is_none());
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError { code, message, .. } => {
@@ -1685,7 +1926,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_invalid_voice_volume_out_of_range() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_voices();
         // Volume outside valid range (0.0 to 1.0)
@@ -1693,7 +1934,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1703,9 +1944,9 @@ mod tests {
         // Should return false (fatal error)
         assert!(!should_continue);
         assert!(session.is_none());
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError { code, message, .. } => {
@@ -1721,7 +1962,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_invalid_voice_negative_volume() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_voices();
         // Negative volume is invalid
@@ -1729,7 +1970,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1739,9 +1980,9 @@ mod tests {
         // Should return false (fatal error)
         assert!(!should_continue);
         assert!(session.is_none());
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError { code, message, .. } => {
@@ -1757,7 +1998,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_uses_first_voice_as_default() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_voices();
         // No voice specified - should use first voice
@@ -1765,7 +2006,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1777,7 +2018,7 @@ mod tests {
         // Should use the first voice as default
         assert_eq!(session.as_ref().unwrap().voice.id, "voice_alice");
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionReady { voice, .. } => {
@@ -1793,7 +2034,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_init_voice_validation_uses_correct_provider() {
         // Test that voice validation uses the provider's voice list, not a global list
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
 
         // Create a registry with two providers having different voice lists
@@ -1823,7 +2064,7 @@ mod tests {
             r#"{"type":"session.init","provider":"provider2","voice":{"id":"provider1_voice"}}"#;
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -1834,7 +2075,7 @@ mod tests {
         assert!(!should_continue);
         assert!(session.is_none());
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError {
@@ -1993,7 +2234,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_with_valid_format() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_formats(vec![
             AudioFormat {
@@ -2015,7 +2256,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2032,7 +2273,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_with_transcode_format() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         // Provider only supports PCM
         let registry = create_test_registry_with_formats(vec![AudioFormat {
@@ -2047,7 +2288,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2064,7 +2305,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_error_invalid_format() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         // Provider only supports Opus (no PCM, so can't transcode to MP3)
         let registry = create_test_registry_with_formats(vec![AudioFormat {
@@ -2079,7 +2320,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2089,9 +2330,9 @@ mod tests {
         // Should return false (fatal error)
         assert!(!should_continue);
         assert!(session.is_none());
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::SessionError { code, message, .. } => {
@@ -2108,7 +2349,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_session_init_default_format_when_not_specified() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_formats(vec![
             AudioFormat {
@@ -2130,7 +2371,7 @@ mod tests {
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2150,14 +2391,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_text_message_without_session() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
         let text = r#"{"type":"text","content":"Hello world"}"#;
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2165,9 +2406,9 @@ mod tests {
         .await;
 
         assert!(should_continue);
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::Error { code, .. } => {
@@ -2180,14 +2421,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_text_done_without_session() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
         let text = r#"{"type":"text.done"}"#;
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2195,9 +2436,9 @@ mod tests {
         .await;
 
         assert!(should_continue);
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::Error { code, .. } => {
@@ -2210,14 +2451,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_text_message_invalid_json() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
         let text = "not valid json";
 
         let should_continue = handle_text_message(
             text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2225,9 +2466,9 @@ mod tests {
         .await;
 
         assert!(should_continue);
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             if let ServerMessage::Error { code, .. } = msg {
                 assert_eq!(code, "invalid_message");
@@ -2267,14 +2508,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_message_close() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
         let message = Message::Close(None);
 
         let should_continue = process_message(
             message,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2286,14 +2527,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_message_ping() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
         let message = Message::Ping(vec![1, 2, 3].into());
 
         let should_continue = process_message(
             message,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2302,7 +2543,7 @@ mod tests {
 
         assert!(should_continue);
         // No response expected (Axum handles pong automatically)
-        assert!(sink.messages.is_empty());
+        assert!(sender.messages().is_empty());
     }
 
     // ==================== Utility Tests ====================
@@ -2329,7 +2570,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_full_session_flow_init_then_text() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
 
@@ -2337,7 +2578,7 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         let should_continue = handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2347,7 +2588,7 @@ mod tests {
         assert!(session.is_some());
         assert_eq!(session.as_ref().unwrap().state, SessionState::Ready);
 
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text with a complete sentence followed by more text (streaming style).
         // SRX-based sentence detection only emits sentences when followed by more text,
@@ -2355,7 +2596,7 @@ mod tests {
         let text_msg = r#"{"type":"text","content":"Hello world. And more"}"#;
         let should_continue = handle_text_message(
             text_msg,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2364,8 +2605,8 @@ mod tests {
         assert!(should_continue);
 
         // Now we expect binary audio frames for the complete sentence
-        assert_eq!(sink.messages.len(), 1);
-        assert!(matches!(sink.messages[0], Message::Binary(_)));
+        assert_eq!(sender.messages().len(), 1);
+        assert!(matches!(sender.messages()[0], Message::Binary(_)));
 
         // Session state should transition to Streaming
         assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
@@ -2379,7 +2620,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_text_message_extracts_sentences() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
 
@@ -2387,19 +2628,19 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
         )
         .await;
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text with multiple sentences
         let text_msg = r#"{"type":"text","content":"First sentence. Second sentence. Third"}"#;
         let should_continue = handle_text_message(
             text_msg,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2408,9 +2649,9 @@ mod tests {
         assert!(should_continue);
 
         // Now we expect 2 binary audio frames (one for each complete sentence)
-        assert_eq!(sink.messages.len(), 2);
-        assert!(matches!(sink.messages[0], Message::Binary(_)));
-        assert!(matches!(sink.messages[1], Message::Binary(_)));
+        assert_eq!(sender.messages().len(), 2);
+        assert!(matches!(sender.messages()[0], Message::Binary(_)));
+        assert!(matches!(sender.messages()[1], Message::Binary(_)));
 
         // Buffer should contain the incomplete part ("Third")
         assert!(!session.as_ref().unwrap().buffer.is_empty());
@@ -2422,7 +2663,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_text_message_updates_last_activity() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
 
@@ -2430,7 +2671,7 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2442,13 +2683,13 @@ mod tests {
         // Small delay to ensure time difference
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text (no complete sentence, so no audio)
         let text_msg = r#"{"type":"text","content":"Test"}"#;
         handle_text_message(
             text_msg,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2461,7 +2702,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_text_message_state_stays_streaming_on_subsequent_messages() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
 
@@ -2469,19 +2710,19 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
         )
         .await;
-        sink.messages.clear();
+        sender.clear_messages();
 
         // First text message with complete sentence - transitions to Streaming
         let text_msg1 = r#"{"type":"text","content":"First. "}"#;
         handle_text_message(
             text_msg1,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2493,7 +2734,7 @@ mod tests {
         let text_msg2 = r#"{"type":"text","content":"Second. "}"#;
         handle_text_message(
             text_msg2,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2502,16 +2743,16 @@ mod tests {
         assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
 
         // Now we expect 2 binary audio frames (one for each complete sentence)
-        assert_eq!(sink.messages.len(), 2);
-        assert!(matches!(sink.messages[0], Message::Binary(_)));
-        assert!(matches!(sink.messages[1], Message::Binary(_)));
+        assert_eq!(sender.messages().len(), 2);
+        assert!(matches!(sender.messages()[0], Message::Binary(_)));
+        assert!(matches!(sender.messages()[1], Message::Binary(_)));
     }
 
     // ==================== Text Done Tests ====================
 
     #[tokio::test]
     async fn test_text_done_sends_audio_done() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
 
@@ -2519,19 +2760,19 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
         )
         .await;
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text.done
         let done_text = r#"{"type":"text.done"}"#;
         let should_continue = handle_text_message(
             done_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2539,10 +2780,10 @@ mod tests {
         .await;
 
         assert!(should_continue);
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
         // Verify audio.done response
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::AudioDone {
@@ -2566,7 +2807,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_text_done_flushes_buffer_and_counts_sentences() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
 
@@ -2574,19 +2815,19 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
         )
         .await;
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text with complete sentences and an incomplete one
         let text_msg = r#"{"type":"text","content":"First sentence. Second sentence. Incomplete"}"#;
         handle_text_message(
             text_msg,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2594,9 +2835,9 @@ mod tests {
         .await;
 
         // 2 binary audio frames should have been sent for the 2 complete sentences
-        assert_eq!(sink.messages.len(), 2);
-        assert!(matches!(sink.messages[0], Message::Binary(_)));
-        assert!(matches!(sink.messages[1], Message::Binary(_)));
+        assert_eq!(sender.messages().len(), 2);
+        assert!(matches!(sender.messages()[0], Message::Binary(_)));
+        assert!(matches!(sender.messages()[1], Message::Binary(_)));
 
         // Buffer should have the incomplete text
         assert_eq!(
@@ -2604,13 +2845,13 @@ mod tests {
             "Incomplete"
         );
 
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text.done - should flush the incomplete text and synthesize it
         let done_text = r#"{"type":"text.done"}"#;
         let should_continue = handle_text_message(
             done_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2619,11 +2860,11 @@ mod tests {
 
         assert!(should_continue);
         // Expect 1 binary frame for the flushed sentence + 1 text frame for audio.done
-        assert_eq!(sink.messages.len(), 2);
-        assert!(matches!(sink.messages[0], Message::Binary(_)));
+        assert_eq!(sender.messages().len(), 2);
+        assert!(matches!(sender.messages()[0], Message::Binary(_)));
 
         // Verify audio.done response has correct sentence count and statistics
-        if let Message::Text(json) = &sink.messages[1] {
+        if let Message::Text(json) = &sender.messages()[1] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::AudioDone {
@@ -2649,7 +2890,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_text_done_state_transitions() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
 
@@ -2657,7 +2898,7 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2669,7 +2910,7 @@ mod tests {
         let text_msg = r#"{"type":"text","content":"Hello. "}"#;
         handle_text_message(
             text_msg,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2677,13 +2918,13 @@ mod tests {
         .await;
         assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
 
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text.done - transitions to Closed (through Completing)
         let done_text = r#"{"type":"text.done"}"#;
         handle_text_message(
             done_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2696,7 +2937,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_full_session_flow_init_text_done() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
 
@@ -2704,7 +2945,7 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         let should_continue = handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2712,7 +2953,7 @@ mod tests {
         .await;
         assert!(should_continue);
         assert!(session.is_some());
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text with two complete sentences.
         // SRX detects "Hello world." as complete because it's followed by " Goodbye world."
@@ -2720,7 +2961,7 @@ mod tests {
         let text_msg = r#"{"type":"text","content":"Hello world. Goodbye world."}"#;
         let should_continue = handle_text_message(
             text_msg,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2728,16 +2969,16 @@ mod tests {
         .await;
         assert!(should_continue);
         // 1 binary frame for the first complete sentence
-        assert_eq!(sink.messages.len(), 1);
-        assert!(matches!(sink.messages[0], Message::Binary(_)));
+        assert_eq!(sender.messages().len(), 1);
+        assert!(matches!(sender.messages()[0], Message::Binary(_)));
 
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text.done - this flushes "Goodbye world." from buffer
         let done_text = r#"{"type":"text.done"}"#;
         let should_continue = handle_text_message(
             done_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2746,11 +2987,11 @@ mod tests {
         assert!(should_continue);
 
         // Verify flushed sentence audio + audio.done was sent
-        assert_eq!(sink.messages.len(), 2);
+        assert_eq!(sender.messages().len(), 2);
         // First message should be binary audio for the flushed sentence
-        assert!(matches!(sink.messages[0], Message::Binary(_)));
+        assert!(matches!(sender.messages()[0], Message::Binary(_)));
         // Second message should be audio.done
-        if let Message::Text(json) = &sink.messages[1] {
+        if let Message::Text(json) = &sender.messages()[1] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::AudioDone {
@@ -2776,7 +3017,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_audio_chunk_binary_frame_format() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
 
@@ -2784,20 +3025,20 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
         )
         .await;
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text with one complete sentence followed by more text (streaming style).
         // SRX needs following text to detect sentence boundaries.
         let text_msg = r#"{"type":"text","content":"Hello world. More text here"}"#;
         handle_text_message(
             text_msg,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2805,10 +3046,10 @@ mod tests {
         .await;
 
         // Should have 1 binary frame for "Hello world."
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
         // Parse the binary frame
-        if let Message::Binary(data) = &sink.messages[0] {
+        if let Message::Binary(data) = &sender.messages()[0] {
             // Frame should have 12-byte header + data
             assert!(data.len() >= 12);
 
@@ -2832,7 +3073,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_synthesis_error_sends_error_message() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry_with_mode(MockSynthesisMode::FailInit {
             error: "Test synthesis failure".to_string(),
@@ -2842,13 +3083,13 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
         )
         .await;
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text with one complete sentence followed by more text (streaming style).
         // SRX needs following text to detect sentence boundaries.
@@ -2856,7 +3097,7 @@ mod tests {
         let text_msg = r#"{"type":"text","content":"Hello world. More text"}"#;
         let should_continue = handle_text_message(
             text_msg,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2867,9 +3108,9 @@ mod tests {
         assert!(should_continue);
 
         // Should have 1 error message (no binary audio due to failure)
-        assert_eq!(sink.messages.len(), 1);
+        assert_eq!(sender.messages().len(), 1);
 
-        if let Message::Text(json) = &sink.messages[0] {
+        if let Message::Text(json) = &sender.messages()[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::Error {
@@ -2892,7 +3133,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::cast_possible_truncation)]
     async fn test_multiple_sentences_sequence_numbers() {
-        let mut sink = MockSink::new();
+        let mut sender = TestSender::new();
         let mut session = None;
         let registry = create_test_registry();
 
@@ -2900,13 +3141,13 @@ mod tests {
         let init_text = r#"{"type":"session.init"}"#;
         handle_text_message(
             init_text,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
         )
         .await;
-        sink.messages.clear();
+        sender.clear_messages();
 
         // Send text with three complete sentences followed by more text.
         // SRX only emits sentences when followed by more text (streaming behavior).
@@ -2915,7 +3156,7 @@ mod tests {
         let text_msg = r#"{"type":"text","content":"First. Second. Third. More"}"#;
         handle_text_message(
             text_msg,
-            &mut sink,
+            sender.as_bp_sender(),
             &mut session,
             &registry,
             &default_buffer_config(),
@@ -2923,10 +3164,10 @@ mod tests {
         .await;
 
         // Should have 3 binary frames
-        assert_eq!(sink.messages.len(), 3);
+        assert_eq!(sender.messages().len(), 3);
 
         // Verify sequence numbers and sentence indices
-        for (i, msg) in sink.messages.iter().enumerate() {
+        for (i, msg) in sender.messages().iter().enumerate() {
             if let Message::Binary(data) = msg {
                 let sequence = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 let sentence_index = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);

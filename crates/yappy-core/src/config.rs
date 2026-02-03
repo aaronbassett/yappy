@@ -40,6 +40,14 @@ pub struct ServerConfig {
     /// Synthesis request timeout in seconds (default: 30)
     #[serde(default = "default_synthesis_timeout")]
     pub synthesis_timeout_secs: u64,
+
+    /// Audio channel capacity for backpressure (default: 32)
+    ///
+    /// This controls the bounded channel capacity between the TTS synthesis task
+    /// and the WebSocket sender. When the channel is full, synthesis pauses until
+    /// the client consumes audio frames. Valid range: 1-256.
+    #[serde(default = "default_audio_channel_capacity")]
+    pub audio_channel_capacity: usize,
 }
 
 fn default_host() -> String {
@@ -62,6 +70,10 @@ const fn default_synthesis_timeout() -> u64 {
     30
 }
 
+const fn default_audio_channel_capacity() -> usize {
+    32
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -70,6 +82,7 @@ impl Default for ServerConfig {
             log_level: default_log_level(),
             idle_timeout_secs: default_idle_timeout(),
             synthesis_timeout_secs: default_synthesis_timeout(),
+            audio_channel_capacity: default_audio_channel_capacity(),
         }
     }
 }
@@ -262,6 +275,20 @@ impl Config {
             });
         }
 
+        // Audio channel capacity validation (1-256)
+        if self.server.audio_channel_capacity == 0 {
+            return Err(ConfigValidationError::InvalidAudioChannelCapacity {
+                value: 0,
+                reason: "must be > 0".to_string(),
+            });
+        }
+        if self.server.audio_channel_capacity > MAX_AUDIO_CHANNEL_CAPACITY {
+            return Err(ConfigValidationError::InvalidAudioChannelCapacity {
+                value: self.server.audio_channel_capacity,
+                reason: format!("must be <= {MAX_AUDIO_CHANNEL_CAPACITY}"),
+            });
+        }
+
         Ok(())
     }
 
@@ -356,6 +383,9 @@ impl Config {
 /// Maximum allowed buffer size (1MB)
 const MAX_BUFFER_SIZE: usize = 1_048_576;
 
+/// Maximum allowed audio channel capacity
+const MAX_AUDIO_CHANNEL_CAPACITY: usize = 256;
+
 /// Valid log levels
 const VALID_LOG_LEVELS: &[&str] = &["error", "warn", "info", "debug", "trace"];
 
@@ -387,6 +417,15 @@ pub enum ConfigValidationError {
     /// Invalid buffer configuration
     #[error("Invalid buffer config: {0}")]
     InvalidBufferConfig(String),
+
+    /// Invalid audio channel capacity
+    #[error("Invalid audio_channel_capacity: {value} ({reason})")]
+    InvalidAudioChannelCapacity {
+        /// The invalid value
+        value: usize,
+        /// Why it's invalid
+        reason: String,
+    },
 
     /// Empty API key for `OpenAI`
     #[error("OpenAI API key is empty or not set")]
