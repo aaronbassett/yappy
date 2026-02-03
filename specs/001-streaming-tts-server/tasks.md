@@ -169,8 +169,8 @@
 ### Phase Completion
 - [x] T088 [GIT] Push branch to origin (ensure pre-push hooks pass)
 - [x] T089 [GIT] Create/update PR to main with phase summary (added comment to PR #1)
-- [x] T090 [GIT] Verify all CI checks pass
-- [x] T091 [GIT] Report PR ready status
+- [x] T090 [GIT] Verify all CI checks pass (all 4 checks passing: Build macos, Build ubuntu, Build macOS all features, Check)
+- [x] T091 [GIT] Report PR ready status (PR #1 ready for review)
 
 **Checkpoint**: MVP complete - Basic streaming TTS works end-to-end
 
