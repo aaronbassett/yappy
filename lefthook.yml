@@ -1,0 +1,53 @@
+# Lefthook Git hooks configuration
+# Install: brew install lefthook && lefthook install
+# Docs: https://github.com/evilmartians/lefthook
+
+# Validate commit messages follow conventional commits format
+commit-msg:
+  commands:
+    conventional-commit:
+      run: |
+        message=$(cat {1})
+        pattern="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?: .{1,}"
+        if ! echo "$message" | grep -qE "$pattern"; then
+          echo "Error: Commit message must follow Conventional Commits format"
+          echo "Format: type(scope): description"
+          echo "Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+          echo ""
+          echo "Your message: $message"
+          exit 1
+        fi
+
+# Pre-commit: Fast checks on staged files
+pre-commit:
+  parallel: true
+  commands:
+    format-check:
+      glob: "*.rs"
+      run: cargo fmt -- --check
+      fail_text: "Run 'cargo fmt' to fix formatting"
+
+    clippy-staged:
+      glob: "*.rs"
+      run: cargo clippy --all-targets --all-features -- -D warnings
+      fail_text: "Fix clippy warnings before committing"
+
+# Pre-push: Full validation before pushing
+pre-push:
+  parallel: false
+  commands:
+    format:
+      run: cargo fmt -- --check
+      fail_text: "Code is not formatted. Run 'cargo fmt'"
+
+    clippy:
+      run: cargo clippy --all-targets --all-features -- -D warnings
+      fail_text: "Clippy found warnings. Run 'cargo clippy --fix'"
+
+    test:
+      run: cargo test --all-features
+      fail_text: "Tests failed"
+
+    doc:
+      run: cargo doc --no-deps --all-features
+      fail_text: "Documentation generation failed"

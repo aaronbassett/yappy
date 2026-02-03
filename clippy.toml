@@ -1,0 +1,23 @@
+# Clippy configuration for Yappy
+# See: https://doc.rust-lang.org/clippy/configuration.html
+
+# Cognitive complexity threshold
+cognitive-complexity-threshold = 25
+
+# Type complexity threshold
+type-complexity-threshold = 250
+
+# Maximum lines in a function
+too-many-lines-threshold = 100
+
+# Maximum arguments in a function
+too-many-arguments-threshold = 7
+
+# Allow certain patterns
+allowed-idents-below-min-chars = ["x", "y", "z", "i", "j", "k", "n", "id", "ws", "tx", "rx"]
+
+# MSRV - minimum supported Rust version
+msrv = "1.75"
+
+# Documentation requirements (relaxed for private items)
+missing-docs-in-crate-items = false
