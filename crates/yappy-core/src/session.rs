@@ -31,7 +31,20 @@ impl std::fmt::Display for SessionId {
     }
 }
 
-/// Session state for an active WebSocket connection
+/// Session state for an active WebSocket connection.
+///
+/// # Isolation (FR-018)
+///
+/// Each `Session` instance is fully isolated from other sessions:
+///
+/// - All fields are **owned** (no `Arc`, `Rc`, or shared references to mutable data)
+/// - The [`SentenceBuffer`] is owned directly, maintaining independent buffer state
+/// - Voice configuration, audio format, and code block mode are per-session
+/// - Statistics (`total_duration_ms`, `total_bytes`, `audio_sequence`) are per-session
+///
+/// This design ensures no cross-contamination between concurrent WebSocket connections.
+/// The server creates a new `Session` for each connection, and all session state is
+/// local to that connection's handler task.
 pub struct Session {
     /// Unique identifier for this session
     pub id: SessionId,

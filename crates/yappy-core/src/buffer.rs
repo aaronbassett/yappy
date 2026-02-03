@@ -254,10 +254,24 @@ pub struct Sentence {
     pub index: u32,
 }
 
-/// Sentence buffer state
+/// Sentence buffer for accumulating text and emitting complete sentences.
 ///
-/// Accumulates text chunks and emits complete sentences for synthesis.
-/// Handles boundary detection and overflow.
+/// Accumulates text chunks from streaming input and emits complete sentences
+/// for synthesis. Handles sentence boundary detection using SRX rules,
+/// code block parsing, and overflow protection.
+///
+/// # Isolation (FR-018)
+///
+/// Each `SentenceBuffer` instance is fully isolated:
+///
+/// - All fields are owned (`String`, `BufferConfig`, primitives)
+/// - No shared references or `Arc`/`Rc` to mutable data
+/// - The only shared state is the static `SRX_RULES`, which is **read-only**
+///   after initialization and safe for concurrent access
+///
+/// This ensures that multiple sessions can use sentence buffers concurrently
+/// without any cross-contamination of buffer contents, sentence indices, or
+/// code block parsing state.
 #[derive(Debug)]
 pub struct SentenceBuffer {
     /// Accumulated text not yet emitted

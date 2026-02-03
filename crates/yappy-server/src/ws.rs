@@ -15,6 +15,29 @@
 //! 6. Client sends `text.done` to signal end of input
 //! 7. Server sends `audio.done` and connection can be closed
 //!
+//! # Session Isolation (FR-018)
+//!
+//! Each WebSocket connection is fully isolated from other connections:
+//!
+//! - **Session object**: Created as a stack-local variable in [`handle_socket`], ensuring
+//!   complete isolation between connections.
+//! - **Sentence buffer**: Owned directly by each [`Session`], not shared. Each session
+//!   maintains its own buffer state, sentence indices, and code block parsing state.
+//! - **Voice configuration**: Stored per-session in the [`Session`] struct, including
+//!   voice ID, speed, pitch, and volume settings.
+//! - **Audio encoding**: The [`AudioFormat`] is stored per-session, allowing different
+//!   connections to use different codecs (PCM, Opus, MP3).
+//! - **Backpressure state**: Each connection has its own [`BackpressureSender`] with
+//!   independent semaphore and metrics.
+//!
+//! The only shared state is:
+//! - **Provider registry** (`ProviderRegistry`): Shared read-only via `Arc`. Providers
+//!   expose only `&self` methods and are never mutated per-session.
+//! - **SRX rules** (sentence segmentation): Static read-only rules initialized once.
+//! - **Configuration**: Cloned when creating sessions, so mutations are local.
+//!
+//! This design ensures no cross-contamination between sessions.
+//!
 //! # Privacy
 //!
 //! Per project requirements, text content is never logged. Only metadata such as
@@ -121,13 +144,33 @@ pub async fn ws_upgrade_handler(State(state): State<AppState>, ws: WebSocketUpgr
 /// # Arguments
 ///
 /// * `socket` - The upgraded WebSocket connection
-/// * `state` - Application state for accessing providers
+/// * `state` - Application state for accessing providers (shared read-only)
 ///
 /// # Session Lifecycle
 ///
 /// Each WebSocket connection can have at most one session. The session is
 /// created when the client sends a `session.init` message and remains active
 /// until the connection closes.
+///
+/// # Session Isolation (FR-018)
+///
+/// This function creates all per-connection state as local variables, ensuring
+/// complete isolation between WebSocket connections:
+///
+/// - `session: Option<Session>` - Stack-local, unique per connection
+/// - `bp_sender: BackpressureSender` - Owns its own semaphore and metrics
+///
+/// The `state` parameter provides shared read-only access to providers via
+/// `Arc<ProviderRegistry>`. Provider methods take `&self` and never mutate
+/// state based on session-specific data.
+///
+/// ## Isolation Guarantees
+///
+/// - Buffer state: Each session owns its [`SentenceBuffer`] directly
+/// - Voice config: Stored in session, not shared
+/// - Audio format: Stored in session, not shared
+/// - Sequence numbers: Maintained per-session in [`Session::audio_sequence`]
+/// - Statistics: Accumulated per-session in [`Session::total_duration_ms`] and [`Session::total_bytes`]
 #[instrument(name = "ws_connection", skip_all, fields(remote_addr))]
 async fn handle_socket(socket: WebSocket, state: AppState) {
     info!("WebSocket connection established");
@@ -679,7 +722,14 @@ where
     // Resolve code block mode
     let code_block_mode = requested_code_block_mode.unwrap_or_default();
 
-    // Create the session with the configured buffer settings
+    // Create the session with the configured buffer settings.
+    //
+    // ISOLATION NOTE (FR-018): This creates a completely new Session instance
+    // with all owned state. The Session is stored in the stack-local `session`
+    // variable in handle_socket(), ensuring no sharing between connections.
+    // - buffer_config is cloned, so mutations are local
+    // - Session owns its SentenceBuffer directly
+    // - All statistics start at zero for this session
     let new_session = Session::with_buffer_config(
         provider_id,
         voice.clone(),
@@ -688,6 +738,24 @@ where
         buffer_config.clone(),
     );
     let session_id = new_session.id.clone();
+
+    // Debug assertion: verify the session starts with clean state (FR-018 isolation)
+    debug_assert!(
+        new_session.buffer.is_empty(),
+        "New session should have empty buffer"
+    );
+    debug_assert_eq!(
+        new_session.audio_sequence, 0,
+        "New session should start at sequence 0"
+    );
+    debug_assert_eq!(
+        new_session.total_bytes, 0,
+        "New session should have zero bytes"
+    );
+    debug_assert_eq!(
+        new_session.total_duration_ms, 0,
+        "New session should have zero duration"
+    );
 
     info!(
         session_id = %session_id,
