@@ -23,6 +23,8 @@
 //! let status = provider.health_check().await;
 //! ```
 
+// Allow unsafe code for Objective-C interop via objc2
+#![allow(unsafe_code)]
 #![warn(missing_docs)]
 #![cfg(target_os = "macos")]
 
@@ -411,13 +413,11 @@ impl AvSpeechProvider {
                     }
 
                     // Get the first channel (mono)
-                    let channel_ptr = *float_data;
-                    if channel_ptr.is_null() {
-                        return;
-                    }
+                    // NonNull is guaranteed non-null, so no null check needed
+                    let channel_ptr: std::ptr::NonNull<f32> = *float_data;
 
                     // Read samples from the buffer
-                    let samples = std::slice::from_raw_parts(channel_ptr, frame_count);
+                    let samples = std::slice::from_raw_parts(channel_ptr.as_ptr(), frame_count);
 
                     // Convert float32 to 16-bit PCM and split into chunks
                     let mut current_chunk_samples = Vec::with_capacity(SAMPLES_PER_CHUNK);
