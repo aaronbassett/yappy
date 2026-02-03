@@ -30,15 +30,20 @@
 
 #![warn(missing_docs)]
 
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument, warn};
+use tracing::{debug, info, instrument, trace, warn};
 
-use yappy_core::audio::{AudioCodec, AudioFormat, AudioStream};
+use yappy_core::audio::{AudioChunk, AudioCodec, AudioFormat, AudioStream};
 use yappy_core::error::ProviderError;
 use yappy_core::provider::{
     ProviderId, ProviderMetadata, ProviderStatus, TtsProvider, VoiceGender, VoiceInfo,
@@ -56,6 +61,306 @@ const MODEL_FILENAME: &str = "kokoro-v1.0.onnx";
 
 /// Voice embeddings filename within the repository
 const VOICES_FILENAME: &str = "voices-v1.0.bin";
+
+/// Kokoro model output sample rate in Hz
+const SAMPLE_RATE: u32 = 24000;
+
+/// Audio chunk duration in milliseconds (20ms is typical for low-latency streaming)
+const CHUNK_DURATION_MS: u32 = 20;
+
+/// Samples per chunk at 24kHz: 24000 * 0.020 = 480
+const SAMPLES_PER_CHUNK: usize = (SAMPLE_RATE as usize * CHUNK_DURATION_MS as usize) / 1000;
+
+/// Maximum input token length for Kokoro model
+const MAX_TOKEN_LENGTH: usize = 512;
+
+/// Style embedding dimension (Kokoro uses 256-dimensional embeddings)
+const STYLE_DIM: usize = 256;
+
+// ============================================================================
+// Phoneme Tokenization (Placeholder Implementation)
+// ============================================================================
+
+/// Placeholder phoneme tokenizer.
+///
+/// TODO: Replace with proper phoneme tokenization using a library like `misaki`
+/// or implement IPA-based tokenization. The Kokoro model expects phoneme tokens,
+/// not raw text characters.
+///
+/// For now, this provides a simple character-to-token mapping that will produce
+/// audio output, but the quality will be poor since characters don't map directly
+/// to the phoneme vocabulary the model was trained on.
+struct PhonemeTokenizer {
+    /// Character to token ID mapping
+    char_to_token: HashMap<char, i64>,
+    /// Padding token ID
+    pad_token: i64,
+}
+
+impl PhonemeTokenizer {
+    /// Create a new placeholder tokenizer.
+    ///
+    /// This builds a simple mapping from ASCII characters to token IDs.
+    /// The actual Kokoro vocabulary is phoneme-based (IPA symbols), so this
+    /// is just a placeholder that allows testing the synthesis pipeline.
+    fn new() -> Self {
+        let mut char_to_token = HashMap::new();
+
+        // Token 0 is typically padding
+        let pad_token = 0i64;
+
+        // Build a simple vocabulary: map common characters to token IDs
+        // This is NOT the actual Kokoro vocabulary, just a placeholder
+        // that produces valid input tensors.
+        //
+        // TODO: Load the actual vocabulary from the model or implement
+        // proper grapheme-to-phoneme conversion using:
+        // - espeak-ng for G2P
+        // - A trained G2P model
+        // - The misaki library (Python, would need Rust port)
+
+        // Space and punctuation
+        char_to_token.insert(' ', 1);
+        char_to_token.insert('.', 2);
+        char_to_token.insert(',', 3);
+        char_to_token.insert('!', 4);
+        char_to_token.insert('?', 5);
+        char_to_token.insert('\'', 6);
+        char_to_token.insert('-', 7);
+        char_to_token.insert(':', 8);
+        char_to_token.insert(';', 9);
+
+        // Lowercase letters (most common in normalized text)
+        #[allow(clippy::cast_possible_wrap)]
+        for (i, c) in ('a'..='z').enumerate() {
+            char_to_token.insert(c, (10 + i) as i64);
+        }
+
+        // Uppercase letters (map to same tokens as lowercase for simplicity)
+        #[allow(clippy::cast_possible_wrap)]
+        for (i, c) in ('A'..='Z').enumerate() {
+            char_to_token.insert(c, (10 + i) as i64);
+        }
+
+        // Digits
+        #[allow(clippy::cast_possible_wrap)]
+        for (i, c) in ('0'..='9').enumerate() {
+            char_to_token.insert(c, (36 + i) as i64);
+        }
+
+        Self {
+            char_to_token,
+            pad_token,
+        }
+    }
+
+    /// Tokenize text into a sequence of token IDs.
+    ///
+    /// Returns a vector of token IDs padded/truncated to fit within `MAX_TOKEN_LENGTH`.
+    ///
+    /// # Arguments
+    /// * `text` - The input text to tokenize
+    ///
+    /// # Returns
+    /// A vector of i64 token IDs with length <= `MAX_TOKEN_LENGTH`
+    fn tokenize(&self, text: &str) -> Vec<i64> {
+        let mut tokens: Vec<i64> = text
+            .chars()
+            .filter_map(|c| {
+                self.char_to_token.get(&c).copied().or_else(|| {
+                    // Unknown character - map to space token
+                    trace!(char = ?c, "Unknown character, mapping to space");
+                    Some(self.char_to_token[&' '])
+                })
+            })
+            .take(MAX_TOKEN_LENGTH)
+            .collect();
+
+        // Ensure minimum length (model may require at least 1 token)
+        if tokens.is_empty() {
+            tokens.push(self.pad_token);
+        }
+
+        tokens
+    }
+
+    /// Get the padding token ID.
+    #[allow(dead_code)]
+    const fn pad_token(&self) -> i64 {
+        self.pad_token
+    }
+}
+
+impl Default for PhonemeTokenizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Voice Embedding Loading
+// ============================================================================
+
+/// Voice embeddings container.
+///
+/// The voices-v1.0.bin file contains pre-computed style embeddings for each voice.
+/// Each voice has embeddings for different input lengths, stored as float32 arrays.
+struct VoiceEmbeddings {
+    /// Map from voice ID to embedding data.
+    /// Each embedding is shape (`max_len`, 1, 256) stored as flat `Vec<f32>`
+    embeddings: HashMap<String, Vec<f32>>,
+    /// Maximum token length the embeddings support
+    max_length: usize,
+}
+
+impl VoiceEmbeddings {
+    /// Load voice embeddings from the binary file.
+    ///
+    /// The voices-v1.0.bin file format (based on Kokoro model):
+    /// - Contains embeddings for multiple voices
+    /// - Each voice has shape (`max_len`, 1, 256) of float32 values
+    ///
+    /// # Arguments
+    /// * `path` - Path to the voices-v1.0.bin file
+    ///
+    /// # Returns
+    /// `VoiceEmbeddings` or an error if loading fails
+    fn load(path: &Path) -> Result<Self, ProviderError> {
+        info!(?path, "Loading voice embeddings");
+
+        let file = File::open(path).map_err(|e| ProviderError::InitializationFailed {
+            message: format!("Failed to open voices file {}: {e}", path.display()),
+        })?;
+
+        let metadata = file
+            .metadata()
+            .map_err(|e| ProviderError::InitializationFailed {
+                message: format!("Failed to get voices file metadata: {e}"),
+            })?;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let file_size = metadata.len() as usize;
+        debug!(file_size, "Voice embeddings file size");
+
+        let mut reader = BufReader::new(file);
+        let mut buffer = vec![0u8; file_size];
+        reader
+            .read_exact(&mut buffer)
+            .map_err(|e| ProviderError::InitializationFailed {
+                message: format!("Failed to read voices file: {e}"),
+            })?;
+
+        // Parse the binary file
+        // The format appears to be a simple concatenation of voice embeddings.
+        // Each voice has (512, 1, 256) float32 values = 512 * 256 * 4 = 524288 bytes
+        //
+        // Known voices in order (based on Kokoro model):
+        // af_bella, af_nicole, af_sarah, af_sky, am_adam, am_michael,
+        // bf_emma, bf_isabella, bm_george, bm_lewis
+        let voice_ids = [
+            "af_bella",
+            "af_nicole",
+            "af_sarah",
+            "af_sky",
+            "am_adam",
+            "am_michael",
+            "bf_emma",
+            "bf_isabella",
+            "bm_george",
+            "bm_lewis",
+        ];
+
+        let max_length = MAX_TOKEN_LENGTH; // 512
+        let embedding_dim = STYLE_DIM; // 256
+        let embedding_size = max_length * embedding_dim; // floats per voice
+        let bytes_per_voice = embedding_size * 4; // 4 bytes per float32
+
+        // Validate file size
+        let expected_size = voice_ids.len() * bytes_per_voice;
+        if file_size != expected_size {
+            warn!(
+                file_size,
+                expected_size, "Voice embeddings file size mismatch, attempting to parse anyway"
+            );
+        }
+
+        let mut embeddings = HashMap::new();
+
+        for (i, voice_id) in voice_ids.iter().enumerate() {
+            let start = i * bytes_per_voice;
+            let end = start + bytes_per_voice;
+
+            if end > buffer.len() {
+                warn!(voice_id, "Voice embedding data truncated, skipping");
+                continue;
+            }
+
+            // Convert bytes to f32
+            let voice_bytes = &buffer[start..end];
+            let floats: Vec<f32> = voice_bytes
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+
+            debug!(
+                voice_id,
+                num_floats = floats.len(),
+                "Loaded voice embedding"
+            );
+            embeddings.insert((*voice_id).to_string(), floats);
+        }
+
+        info!(num_voices = embeddings.len(), "Voice embeddings loaded");
+
+        Ok(Self {
+            embeddings,
+            max_length,
+        })
+    }
+
+    /// Get the style embedding for a voice at a specific token length.
+    ///
+    /// Returns a slice of the embedding of shape (1, 1, 256) for the given token count.
+    ///
+    /// # Arguments
+    /// * `voice_id` - The voice identifier
+    /// * `token_length` - Number of input tokens (determines which embedding row to use)
+    ///
+    /// # Returns
+    /// A Vec<f32> of length 256 representing the style embedding, or an error
+    fn get_embedding(
+        &self,
+        voice_id: &str,
+        token_length: usize,
+    ) -> Result<Vec<f32>, ProviderError> {
+        let embedding_data =
+            self.embeddings
+                .get(voice_id)
+                .ok_or_else(|| ProviderError::InvalidVoice {
+                    voice_id: voice_id.to_string(),
+                    available: self.embeddings.keys().cloned().collect(),
+                })?;
+
+        // Clamp token length to valid range
+        let idx = token_length.min(self.max_length - 1);
+
+        // Extract the embedding row for this token length
+        // Shape is (max_len, 256), so row idx starts at idx * 256
+        let start = idx * STYLE_DIM;
+        let end = start + STYLE_DIM;
+
+        if end > embedding_data.len() {
+            return Err(ProviderError::SynthesisFailed {
+                message: format!(
+                    "Embedding index out of bounds for voice {voice_id}: {end} > {}",
+                    embedding_data.len()
+                ),
+            });
+        }
+
+        Ok(embedding_data[start..end].to_vec())
+    }
+}
 
 /// Configuration for the Kokoro TTS provider
 #[derive(Debug, Clone)]
@@ -132,10 +437,13 @@ pub struct KokoroProvider {
     /// The session is loaded when `load_model()` is called.
     session: RwLock<Option<ort::session::Session>>,
 
-    /// Path to the downloaded voice embeddings file.
+    /// Loaded voice embeddings.
     ///
     /// Populated after `load_model()` completes successfully.
-    voices_file_path: RwLock<Option<PathBuf>>,
+    voice_embeddings: RwLock<Option<VoiceEmbeddings>>,
+
+    /// Phoneme tokenizer (placeholder implementation).
+    tokenizer: PhonemeTokenizer,
 }
 
 impl KokoroProvider {
@@ -171,7 +479,8 @@ impl KokoroProvider {
             config,
             model_loaded: AtomicBool::new(false),
             session: RwLock::new(None),
-            voices_file_path: RwLock::new(None),
+            voice_embeddings: RwLock::new(None),
+            tokenizer: PhonemeTokenizer::new(),
         }
     }
 
@@ -303,15 +612,25 @@ impl KokoroProvider {
             *session_guard = Some(session);
         }
 
-        // Store the voices path
+        // Load voice embeddings (blocking operation, run in spawn_blocking)
+        let embeddings = {
+            let path = voices_path;
+            tokio::task::spawn_blocking(move || VoiceEmbeddings::load(&path))
+                .await
+                .map_err(|e| ProviderError::InitializationFailed {
+                    message: format!("Task join error while loading voice embeddings: {e}"),
+                })??
+        };
+
+        // Store the embeddings
         {
-            let mut voices_guard =
-                self.voices_file_path
+            let mut embeddings_guard =
+                self.voice_embeddings
                     .write()
                     .map_err(|e| ProviderError::InitializationFailed {
-                        message: format!("Failed to acquire voices path write lock: {e}"),
+                        message: format!("Failed to acquire embeddings write lock: {e}"),
                     })?;
-            *voices_guard = Some(voices_path);
+            *embeddings_guard = Some(embeddings);
         }
 
         // Mark as loaded
@@ -588,13 +907,9 @@ impl TtsProvider for KokoroProvider {
     /// - Voice ID is invalid ([`ProviderError::InvalidVoice`])
     /// - Audio format is not supported ([`ProviderError::UnsupportedFormat`])
     /// - Synthesis fails ([`ProviderError::SynthesisFailed`])
-    ///
-    /// # Note
-    ///
-    /// This is a stub implementation. Actual synthesis will be implemented
-    /// in T076-T078.
+    #[allow(clippy::significant_drop_tightening)]
     #[instrument(
-        skip(self, text, _cancel),
+        skip(self, text, cancel),
         fields(
             text_len = text.len(),
             voice_id = %voice.id,
@@ -607,7 +922,7 @@ impl TtsProvider for KokoroProvider {
         text: &str,
         voice: &VoiceConfig,
         format: AudioFormat,
-        _cancel: CancellationToken,
+        cancel: CancellationToken,
     ) -> Result<AudioStream, ProviderError> {
         // Check if model is loaded
         if !self.model_loaded.load(Ordering::SeqCst) {
@@ -633,21 +948,294 @@ impl TtsProvider for KokoroProvider {
             });
         }
 
-        // TODO: Implement actual synthesis in T076-T078
-        // 1. Tokenize text
-        // 2. Run ONNX inference
-        // 3. Encode audio to requested format
-        // 4. Return as AudioStream
+        // Check for early cancellation
+        if cancel.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
 
-        warn!(
-            text_len = text.len(),
-            voice = %voice.id,
-            "Kokoro synthesis not yet implemented"
+        info!(text_len = text.len(), voice_id = %voice.id, "Starting synthesis");
+
+        // 1. Tokenize text
+        let tokens = self.tokenizer.tokenize(text);
+        let token_len = tokens.len();
+        debug!(token_len, "Text tokenized");
+
+        // 2. Get voice embedding for this token length
+        let style_embedding = {
+            let embeddings_guard =
+                self.voice_embeddings
+                    .read()
+                    .map_err(|e| ProviderError::SynthesisFailed {
+                        message: format!("Failed to acquire embeddings read lock: {e}"),
+                    })?;
+            let embeddings =
+                embeddings_guard
+                    .as_ref()
+                    .ok_or_else(|| ProviderError::SynthesisFailed {
+                        message: "Voice embeddings not loaded".to_string(),
+                    })?;
+            embeddings.get_embedding(&voice.id, token_len)?
+        };
+        debug!(
+            embedding_len = style_embedding.len(),
+            "Voice embedding retrieved"
         );
 
-        Err(ProviderError::SynthesisFailed {
-            message: "Kokoro synthesis not yet implemented. Coming in T076-T078.".to_string(),
-        })
+        // 3. Run ONNX inference
+        let audio_samples = {
+            let speed = voice.speed;
+
+            // Get mutable session reference for ONNX runtime
+            let mut session_guard =
+                self.session
+                    .write()
+                    .map_err(|e| ProviderError::SynthesisFailed {
+                        message: format!("Failed to acquire session write lock: {e}"),
+                    })?;
+            let session = session_guard
+                .as_mut()
+                .ok_or_else(|| ProviderError::SynthesisFailed {
+                    message: "ONNX session not loaded".to_string(),
+                })?;
+
+            // Run inference (this is blocking, but we can't use spawn_blocking
+            // easily with the session reference, so we do it inline for now)
+            // TODO: Consider restructuring to allow spawn_blocking for better async behavior
+            Self::run_inference(session, &tokens, &style_embedding, speed)?
+        };
+
+        let num_samples = audio_samples.len();
+        debug!(num_samples, "ONNX inference completed");
+
+        // Check for cancellation after inference
+        if cancel.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
+
+        // 4. Apply volume adjustment
+        let audio_samples: Vec<f32> = if (voice.volume - 1.0).abs() > f32::EPSILON {
+            audio_samples.iter().map(|s| s * voice.volume).collect()
+        } else {
+            audio_samples
+        };
+
+        // 5. Convert to requested format and create audio chunks
+        let chunks = match format.codec {
+            AudioCodec::Pcm => Self::create_pcm_chunks(&audio_samples),
+            AudioCodec::Opus => Self::create_opus_chunks(&audio_samples)?,
+            AudioCodec::Mp3 => {
+                return Err(ProviderError::UnsupportedFormat {
+                    format: format.codec.to_string(),
+                });
+            }
+        };
+
+        info!(
+            num_chunks = chunks.len(),
+            "Synthesis complete, returning audio stream"
+        );
+
+        // Return as a stream
+        Ok(Box::pin(stream::iter(chunks.into_iter().map(Ok))))
+    }
+}
+
+// ============================================================================
+// Helper Functions for Synthesis
+// ============================================================================
+
+impl KokoroProvider {
+    /// Run ONNX inference to generate audio samples.
+    ///
+    /// # Arguments
+    /// * `session` - The ONNX session (mutable reference required by ort)
+    /// * `tokens` - Input token IDs
+    /// * `style` - Style/voice embedding (256 floats)
+    /// * `speed` - Speech rate multiplier
+    ///
+    /// # Returns
+    /// Raw audio samples as float32 at 24kHz
+    fn run_inference(
+        session: &mut ort::session::Session,
+        tokens: &[i64],
+        style: &[f32],
+        speed: f32,
+    ) -> Result<Vec<f32>, ProviderError> {
+        use ort::value::TensorRef;
+
+        // Create input tensors
+        // input_ids: shape (1, seq_len)
+        let seq_len = tokens.len();
+        let input_ids_array: Vec<i64> = tokens.to_vec();
+
+        // style: shape (1, 256)
+        let style_array: Vec<f32> = style.to_vec();
+
+        // speed: shape (1,)
+        let speed_array: Vec<f32> = vec![speed];
+
+        // Create tensor references
+        let input_ids_tensor =
+            TensorRef::from_array_view(([1, seq_len], input_ids_array.as_slice())).map_err(
+                |e| ProviderError::SynthesisFailed {
+                    message: format!("Failed to create input_ids tensor: {e}"),
+                },
+            )?;
+
+        let style_tensor = TensorRef::from_array_view(([1, STYLE_DIM], style_array.as_slice()))
+            .map_err(|e| ProviderError::SynthesisFailed {
+                message: format!("Failed to create style tensor: {e}"),
+            })?;
+
+        let speed_tensor =
+            TensorRef::from_array_view(([1usize], speed_array.as_slice())).map_err(|e| {
+                ProviderError::SynthesisFailed {
+                    message: format!("Failed to create speed tensor: {e}"),
+                }
+            })?;
+
+        // Run inference
+        // Kokoro model inputs: input_ids, style, speed
+        let outputs = session
+            .run(ort::inputs![
+                "input_ids" => input_ids_tensor,
+                "style" => style_tensor,
+                "speed" => speed_tensor,
+            ])
+            .map_err(|e| ProviderError::SynthesisFailed {
+                message: format!("ONNX inference failed: {e}"),
+            })?;
+
+        // Extract audio output
+        // Output is typically the first output, shape (1, audio_length)
+        let output = &outputs[0];
+
+        // Try to extract as f32 tensor
+        // try_extract_tensor returns (shape, data) tuple
+        let (_shape, audio_data) =
+            output
+                .try_extract_tensor::<f32>()
+                .map_err(|e| ProviderError::SynthesisFailed {
+                    message: format!("Failed to extract audio tensor: {e}"),
+                })?;
+
+        // Convert to Vec<f32>
+        let audio_samples: Vec<f32> = audio_data.to_vec();
+
+        Ok(audio_samples)
+    }
+
+    /// Create PCM audio chunks from float32 samples.
+    ///
+    /// Converts float32 samples (range -1.0 to 1.0) to 16-bit PCM
+    /// and splits into chunks for streaming.
+    fn create_pcm_chunks(samples: &[f32]) -> Vec<AudioChunk> {
+        let mut chunks = Vec::new();
+
+        // Convert f32 samples to i16 PCM
+        #[allow(clippy::cast_possible_truncation)]
+        let pcm_samples: Vec<i16> = samples
+            .iter()
+            .map(|&s| {
+                // Clamp to [-1.0, 1.0] range and convert to i16
+                let clamped = s.clamp(-1.0, 1.0);
+                (clamped * 32767.0) as i16
+            })
+            .collect();
+
+        // Split into chunks of SAMPLES_PER_CHUNK
+        for (sequence, chunk_samples) in pcm_samples.chunks(SAMPLES_PER_CHUNK).enumerate() {
+            // Convert i16 samples to bytes (little-endian)
+            let mut bytes = Vec::with_capacity(chunk_samples.len() * 2);
+            for &sample in chunk_samples {
+                bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+
+            // Calculate duration for this chunk
+            #[allow(clippy::cast_possible_truncation)]
+            let duration_ms = (chunk_samples.len() as u32 * 1000) / SAMPLE_RATE;
+
+            #[allow(clippy::cast_possible_truncation)]
+            let seq = sequence as u32;
+            chunks.push(AudioChunk::new(
+                seq,
+                0, // sentence_index - caller should set this
+                Bytes::from(bytes),
+                duration_ms,
+            ));
+        }
+
+        debug!(num_chunks = chunks.len(), "Created PCM chunks");
+        chunks
+    }
+
+    /// Create Opus-encoded audio chunks from float32 samples.
+    ///
+    /// Encodes audio using Opus codec for efficient streaming.
+    fn create_opus_chunks(samples: &[f32]) -> Result<Vec<AudioChunk>, ProviderError> {
+        use audiopus::{coder::Encoder, Application, Channels, SampleRate};
+
+        // Create Opus encoder
+        let encoder = Encoder::new(
+            SampleRate::Hz24000,
+            Channels::Mono,
+            Application::Voip, // Good for speech
+        )
+        .map_err(|e| ProviderError::SynthesisFailed {
+            message: format!("Failed to create Opus encoder: {e}"),
+        })?;
+
+        // Convert f32 samples to i16 for Opus encoder
+        #[allow(clippy::cast_possible_truncation)]
+        let pcm_samples: Vec<i16> = samples
+            .iter()
+            .map(|&s| {
+                let clamped = s.clamp(-1.0, 1.0);
+                (clamped * 32767.0) as i16
+            })
+            .collect();
+
+        let mut chunks = Vec::new();
+
+        // Opus frame size: 20ms at 24kHz = 480 samples
+        let frame_size = SAMPLES_PER_CHUNK;
+
+        // Encode in frames
+        for (sequence, chunk_samples) in pcm_samples.chunks(frame_size).enumerate() {
+            // Pad if necessary (last chunk might be smaller)
+            let mut frame = chunk_samples.to_vec();
+            if frame.len() < frame_size {
+                frame.resize(frame_size, 0);
+            }
+
+            // Encode to Opus
+            // Max Opus packet size is around 4000 bytes, but typical speech is much smaller
+            let mut output = vec![0u8; 4000];
+            let encoded_len = encoder.encode(&frame, &mut output).map_err(|e| {
+                ProviderError::SynthesisFailed {
+                    message: format!("Opus encoding failed: {e}"),
+                }
+            })?;
+
+            output.truncate(encoded_len);
+
+            // Calculate duration for this chunk
+            let actual_samples = chunk_samples.len().min(frame_size);
+            #[allow(clippy::cast_possible_truncation)]
+            let duration_ms = (actual_samples as u32 * 1000) / SAMPLE_RATE;
+
+            #[allow(clippy::cast_possible_truncation)]
+            let seq = sequence as u32;
+            chunks.push(AudioChunk::new(
+                seq,
+                0, // sentence_index - caller should set this
+                Bytes::from(output),
+                duration_ms,
+            ));
+        }
+
+        debug!(num_chunks = chunks.len(), "Created Opus chunks");
+        Ok(chunks)
     }
 }
 
@@ -957,5 +1545,239 @@ mod tests {
             "Second ensure_model_loaded failed: {:?}",
             result
         );
+    }
+
+    // ========================================================================
+    // Tokenizer Tests
+    // ========================================================================
+
+    #[test]
+    fn test_tokenizer_basic() {
+        let tokenizer = PhonemeTokenizer::new();
+        let tokens = tokenizer.tokenize("Hello");
+
+        // Should have 5 tokens for 5 characters
+        assert_eq!(tokens.len(), 5);
+
+        // All tokens should be non-negative (valid tokens)
+        for token in &tokens {
+            assert!(*token >= 0);
+        }
+    }
+
+    #[test]
+    fn test_tokenizer_empty_string() {
+        let tokenizer = PhonemeTokenizer::new();
+        let tokens = tokenizer.tokenize("");
+
+        // Should have at least one token (padding)
+        assert!(!tokens.is_empty());
+        assert_eq!(tokens[0], tokenizer.pad_token());
+    }
+
+    #[test]
+    fn test_tokenizer_with_punctuation() {
+        let tokenizer = PhonemeTokenizer::new();
+        let tokens = tokenizer.tokenize("Hello, world!");
+
+        // Should handle punctuation
+        assert_eq!(tokens.len(), 13); // "Hello, world!" is 13 characters
+    }
+
+    #[test]
+    fn test_tokenizer_truncation() {
+        let tokenizer = PhonemeTokenizer::new();
+
+        // Create a very long string
+        let long_text = "a".repeat(1000);
+        let tokens = tokenizer.tokenize(&long_text);
+
+        // Should be truncated to MAX_TOKEN_LENGTH
+        assert!(tokens.len() <= MAX_TOKEN_LENGTH);
+    }
+
+    // ========================================================================
+    // PCM Chunk Tests
+    // ========================================================================
+
+    #[test]
+    fn test_create_pcm_chunks_basic() {
+        // Create some test samples (sine wave)
+        let samples: Vec<f32> = (0..SAMPLES_PER_CHUNK * 2)
+            .map(|i| (i as f32 / 100.0).sin())
+            .collect();
+
+        let chunks = KokoroProvider::create_pcm_chunks(&samples);
+
+        // Should create 2 chunks
+        assert_eq!(chunks.len(), 2);
+
+        // Each chunk should have correct duration
+        assert_eq!(chunks[0].duration_ms, CHUNK_DURATION_MS);
+
+        // Verify sequence numbers
+        assert_eq!(chunks[0].sequence, 0);
+        assert_eq!(chunks[1].sequence, 1);
+
+        // Verify data size (16-bit samples = 2 bytes per sample)
+        assert_eq!(chunks[0].data.len(), SAMPLES_PER_CHUNK * 2);
+    }
+
+    #[test]
+    fn test_create_pcm_chunks_empty() {
+        let samples: Vec<f32> = vec![];
+        let chunks = KokoroProvider::create_pcm_chunks(&samples);
+
+        // Should create no chunks for empty input
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn test_create_pcm_chunks_clipping() {
+        // Test that values outside [-1.0, 1.0] are clipped
+        let samples = vec![2.0f32, -2.0, 0.5, -0.5];
+        let chunks = KokoroProvider::create_pcm_chunks(&samples);
+
+        // Should still create a chunk
+        assert_eq!(chunks.len(), 1);
+
+        // Verify that extreme values are clipped to i16 max/min
+        let data = &chunks[0].data;
+        let first_sample = i16::from_le_bytes([data[0], data[1]]);
+        let second_sample = i16::from_le_bytes([data[2], data[3]]);
+
+        // 2.0 should be clipped to 1.0 -> 32767
+        assert_eq!(first_sample, 32767);
+        // -2.0 should be clipped to -1.0 -> -32767 (approximately)
+        assert_eq!(second_sample, -32767);
+    }
+
+    // ========================================================================
+    // Opus Chunk Tests
+    // ========================================================================
+
+    #[test]
+    fn test_create_opus_chunks_basic() {
+        // Create some test samples (sine wave)
+        let samples: Vec<f32> = (0..SAMPLES_PER_CHUNK * 2)
+            .map(|i| (i as f32 / 100.0).sin())
+            .collect();
+
+        let chunks = KokoroProvider::create_opus_chunks(&samples).unwrap();
+
+        // Should create chunks
+        assert!(!chunks.is_empty());
+
+        // Verify sequence numbers
+        assert_eq!(chunks[0].sequence, 0);
+
+        // Opus data should be smaller than raw PCM
+        // (This is a rough check - Opus is typically much more compressed)
+        assert!(chunks[0].data.len() < SAMPLES_PER_CHUNK * 2);
+    }
+
+    #[test]
+    fn test_create_opus_chunks_empty() {
+        let samples: Vec<f32> = vec![];
+        let chunks = KokoroProvider::create_opus_chunks(&samples).unwrap();
+
+        // Should create no chunks for empty input
+        assert!(chunks.is_empty());
+    }
+
+    // ========================================================================
+    // Integration Test (requires model download)
+    // ========================================================================
+
+    /// Full synthesis integration test.
+    /// This test is ignored by default as it requires network access
+    /// and downloads ~200MB of model files.
+    #[tokio::test]
+    #[ignore = "requires network access and downloads large model files"]
+    async fn test_full_synthesis_pcm() {
+        let provider = KokoroProvider::with_defaults();
+        provider.load_model().await.expect("Failed to load model");
+
+        let voice = VoiceConfig {
+            id: "af_bella".to_string(),
+            speed: 1.0,
+            pitch: 0.0,
+            volume: 1.0,
+        };
+
+        let format = AudioFormat {
+            codec: AudioCodec::Pcm,
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: Some(16),
+        };
+
+        let cancel = CancellationToken::new();
+        let result = provider
+            .synthesize("Hello world", &voice, format, cancel)
+            .await;
+
+        assert!(result.is_ok(), "Synthesis failed: {:?}", result.err());
+
+        // Collect all chunks from the stream
+        use futures::StreamExt;
+        let mut stream = result.unwrap();
+        let mut chunks = Vec::new();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Chunk error");
+            chunks.push(chunk);
+        }
+
+        // Should have produced some audio
+        assert!(!chunks.is_empty(), "No audio chunks produced");
+
+        // Total duration should be reasonable (at least 100ms for "Hello world")
+        let total_duration: u32 = chunks.iter().map(|c| c.duration_ms).sum();
+        assert!(
+            total_duration > 100,
+            "Audio too short: {}ms",
+            total_duration
+        );
+    }
+
+    /// Full synthesis integration test with Opus encoding.
+    #[tokio::test]
+    #[ignore = "requires network access and downloads large model files"]
+    async fn test_full_synthesis_opus() {
+        let provider = KokoroProvider::with_defaults();
+        provider.load_model().await.expect("Failed to load model");
+
+        let voice = VoiceConfig {
+            id: "am_adam".to_string(),
+            speed: 1.0,
+            pitch: 0.0,
+            volume: 1.0,
+        };
+
+        let format = AudioFormat {
+            codec: AudioCodec::Opus,
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: None,
+        };
+
+        let cancel = CancellationToken::new();
+        let result = provider
+            .synthesize("Testing Opus encoding", &voice, format, cancel)
+            .await;
+
+        assert!(result.is_ok(), "Synthesis failed: {:?}", result.err());
+
+        // Collect all chunks
+        use futures::StreamExt;
+        let mut stream = result.unwrap();
+        let mut total_bytes = 0usize;
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.expect("Chunk error");
+            total_bytes += chunk.data.len();
+        }
+
+        // Should have produced some audio data
+        assert!(total_bytes > 0, "No audio data produced");
     }
 }

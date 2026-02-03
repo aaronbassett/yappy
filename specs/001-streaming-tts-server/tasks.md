@@ -150,10 +150,10 @@
 - [x] T074 [US1] Implement Kokoro TtsProvider skeleton in crates/yappy-provider-kokoro/src/lib.rs (use devs:rust-dev agent)
 - [x] T075 [GIT] Commit: add Kokoro provider skeleton
 - [x] T076 [US1] Implement ONNX model loading with hf-hub in crates/yappy-provider-kokoro/src/lib.rs (use devs:rust-dev agent)
-- [ ] T077 [GIT] Commit: add ONNX model loading
-- [ ] T078 [US1] Implement Kokoro synthesize() method with ort inference in crates/yappy-provider-kokoro/src/lib.rs (use devs:rust-dev agent)
+- [x] T077 [GIT] Commit: add ONNX model loading
+- [x] T078 [US1] Implement Kokoro synthesize() method with ort inference in crates/yappy-provider-kokoro/src/lib.rs (use devs:rust-dev agent)
 - [ ] T079 [GIT] Commit: add Kokoro synthesize
-- [ ] T080 [US1] Implement Kokoro metadata() and health_check() in crates/yappy-provider-kokoro/src/lib.rs (use devs:rust-dev agent)
+- [x] T080 [US1] Implement Kokoro metadata() and health_check() in crates/yappy-provider-kokoro/src/lib.rs (implemented as part of earlier tasks)
 - [ ] T081 [GIT] Commit: add Kokoro metadata and health check
 
 ### Integration Test

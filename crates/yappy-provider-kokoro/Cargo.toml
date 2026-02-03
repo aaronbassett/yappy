@@ -17,5 +17,12 @@ tracing = { workspace = true }
 ort = { workspace = true }
 hf-hub = { workspace = true }
 
+# Audio processing and streaming
+bytes = { workspace = true }
+futures = { workspace = true }
+
+# Audio encoding
+audiopus = { workspace = true }
+
 [lints]
 workspace = true
