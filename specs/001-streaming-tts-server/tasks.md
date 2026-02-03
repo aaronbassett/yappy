@@ -377,13 +377,13 @@
 - [x] T193 [US6] Run /sdd:map incremental for Phase 8 changes (skipped - not applicable in this context)
 - [x] T194 [GIT] Commit: update codebase documents for phase 8 (combined with T196)
 - [x] T195 [US6] Review specs/001-streaming-tts-server/retro/P8.md and extract critical learnings to CLAUDE.md (no critical learnings to add)
-- [ ] T196 [GIT] Commit: finalize phase 8 retro
+- [x] T196 [GIT] Commit: finalize phase 8 retro
 
 ### Phase Completion
-- [ ] T197 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T198 [GIT] Create/update PR to main with phase summary
-- [ ] T199 [GIT] Verify all CI checks pass
-- [ ] T200 [GIT] Report PR ready status
+- [x] T197 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [x] T198 [GIT] Create/update PR to main with phase summary (added comment to PR #1)
+- [x] T199 [GIT] Verify all CI checks pass (all 4 checks passing: Check, Build ubuntu, Build macos, Build macOS all features)
+- [x] T200 [GIT] Report PR ready status (PR #1 ready for review)
 
 **Checkpoint**: Error recovery working
 
