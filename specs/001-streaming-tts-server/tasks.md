@@ -356,18 +356,18 @@
 **Independent Test**: Send text that triggers provider error mid-stream, verify error message received and subsequent sentences continue
 
 ### Phase Start
-- [ ] T181 [GIT] Verify working tree is clean before starting Phase 8
-- [ ] T182 [GIT] Pull and rebase on origin/main if needed
-- [ ] T183 [US6] Create specs/001-streaming-tts-server/retro/P8.md for this phase
+- [x] T181 [GIT] Verify working tree is clean before starting Phase 8
+- [x] T182 [GIT] Pull and rebase on origin/main if needed (already up to date)
+- [x] T183 [US6] Create specs/001-streaming-tts-server/retro/P8.md for this phase
 - [ ] T184 [GIT] Commit: initialize phase 8 retro
 
 ### Error Handling
-- [ ] T185 [US6] Implement non-fatal error handling (synthesis_failed, rate_limited, provider_timeout) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T186 [GIT] Commit: add non-fatal error handling
-- [ ] T187 [US6] Implement sentence_index tracking for error correlation in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T188 [GIT] Commit: add sentence_index tracking
-- [ ] T189 [US6] Implement fatal error handling with clean WebSocket close in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T190 [GIT] Commit: add fatal error handling
+- [x] T185 [US6] Implement non-fatal error handling (synthesis_failed, rate_limited, provider_timeout) in crates/yappy-server/src/ws.rs (pre-existing from Phase 3)
+- [x] T186 [GIT] Commit: add non-fatal error handling (pre-existing from Phase 3)
+- [x] T187 [US6] Implement sentence_index tracking for error correlation in crates/yappy-server/src/ws.rs (pre-existing from Phase 3)
+- [x] T188 [GIT] Commit: add sentence_index tracking (pre-existing from Phase 3)
+- [x] T189 [US6] Implement fatal error handling with clean WebSocket close in crates/yappy-server/src/ws.rs (pre-existing from Phase 3)
+- [x] T190 [GIT] Commit: add fatal error handling (pre-existing from Phase 3)
 
 ### Integration Test
 - [ ] T191 [US6] Create error recovery integration test in tests/integration/ws_errors.rs (use devs:rust-dev agent)
