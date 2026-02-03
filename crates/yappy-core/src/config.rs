@@ -62,6 +62,14 @@ pub struct ServerConfig {
     /// the client consumes audio frames. Valid range: 1-256.
     #[serde(default = "default_audio_channel_capacity")]
     pub audio_channel_capacity: usize,
+
+    /// Maximum text message size in bytes (default: 65536 = 64KB)
+    ///
+    /// Individual text messages exceeding this limit will be rejected with an
+    /// error response. This prevents memory exhaustion from oversized messages.
+    /// Valid range: 1024 (1KB) to 1048576 (1MB).
+    #[serde(default = "default_max_text_size")]
+    pub max_text_size_bytes: usize,
 }
 
 fn default_host() -> String {
@@ -92,6 +100,17 @@ const fn default_audio_channel_capacity() -> usize {
     32
 }
 
+/// Default max text size: 64KB (65536 bytes)
+const fn default_max_text_size() -> usize {
+    65536
+}
+
+/// Minimum allowed max text size: 1KB
+const MIN_MAX_TEXT_SIZE: usize = 1024;
+
+/// Maximum allowed max text size: 1MB
+const MAX_MAX_TEXT_SIZE: usize = 1_048_576;
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -102,6 +121,7 @@ impl Default for ServerConfig {
             synthesis_timeout_secs: default_synthesis_timeout(),
             session_init_timeout_secs: default_session_init_timeout(),
             audio_channel_capacity: default_audio_channel_capacity(),
+            max_text_size_bytes: default_max_text_size(),
         }
     }
 }
@@ -125,6 +145,11 @@ impl ServerConfig {
     /// Get session init timeout as Duration
     pub const fn session_init_timeout(&self) -> Duration {
         Duration::from_secs(self.session_init_timeout_secs)
+    }
+
+    /// Get max text size in bytes
+    pub const fn max_text_size(&self) -> usize {
+        self.max_text_size_bytes
     }
 }
 
@@ -339,6 +364,20 @@ impl Config {
             });
         }
 
+        // Max text size validation (1KB - 1MB)
+        if self.server.max_text_size_bytes < MIN_MAX_TEXT_SIZE {
+            return Err(ConfigValidationError::InvalidMaxTextSize {
+                value: self.server.max_text_size_bytes,
+                reason: format!("must be >= {MIN_MAX_TEXT_SIZE} (1KB)"),
+            });
+        }
+        if self.server.max_text_size_bytes > MAX_MAX_TEXT_SIZE {
+            return Err(ConfigValidationError::InvalidMaxTextSize {
+                value: self.server.max_text_size_bytes,
+                reason: format!("must be <= {MAX_MAX_TEXT_SIZE} (1MB)"),
+            });
+        }
+
         Ok(())
     }
 
@@ -498,6 +537,15 @@ pub enum ConfigValidationError {
     /// Invalid max concurrent synthesis value
     #[error("Invalid max_concurrent_synthesis: {value} ({reason})")]
     InvalidMaxConcurrentSynthesis {
+        /// The invalid value
+        value: usize,
+        /// Why it's invalid
+        reason: String,
+    },
+
+    /// Invalid max text size value
+    #[error("Invalid max_text_size_bytes: {value} ({reason})")]
+    InvalidMaxTextSize {
         /// The invalid value
         value: usize,
         /// Why it's invalid
@@ -917,6 +965,67 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "Invalid max_concurrent_synthesis: 100 (must be <= 64)"
+        );
+    }
+
+    // ========== Max Text Size Validation Tests ==========
+
+    #[test]
+    fn test_max_text_size_default() {
+        let config = ServerConfig::default();
+        assert_eq!(config.max_text_size_bytes, 65536); // 64KB
+        assert_eq!(config.max_text_size(), 65536);
+    }
+
+    #[test]
+    fn test_invalid_max_text_size_too_small() {
+        let mut config = valid_config();
+        config.server.max_text_size_bytes = MIN_MAX_TEXT_SIZE - 1;
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigValidationError::InvalidMaxTextSize { value, .. }) if value == MIN_MAX_TEXT_SIZE - 1
+        ));
+    }
+
+    #[test]
+    fn test_invalid_max_text_size_too_large() {
+        let mut config = valid_config();
+        config.server.max_text_size_bytes = MAX_MAX_TEXT_SIZE + 1;
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigValidationError::InvalidMaxTextSize { value, .. }) if value == MAX_MAX_TEXT_SIZE + 1
+        ));
+    }
+
+    #[test]
+    fn test_valid_max_text_size_at_min() {
+        let mut config = valid_config();
+        config.server.max_text_size_bytes = MIN_MAX_TEXT_SIZE;
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_valid_max_text_size_at_max() {
+        let mut config = valid_config();
+        config.server.max_text_size_bytes = MAX_MAX_TEXT_SIZE;
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_error_display_invalid_max_text_size() {
+        let err = ConfigValidationError::InvalidMaxTextSize {
+            value: 100,
+            reason: "must be >= 1024 (1KB)".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Invalid max_text_size_bytes: 100 (must be >= 1024 (1KB))"
         );
     }
 }

@@ -577,11 +577,11 @@
 - [x] T295 [P] Implement idle connection timeout (5 min) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [x] T296 [P] Implement synthesis timeout (30 sec) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [x] T297 [P] Implement session init timeout (10 sec) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T298 [GIT] Commit: add timeouts
+- [x] T298 [GIT] Commit: add timeouts
 
 ### Security
-- [ ] T299 [P] Implement config file permission warning in crates/yappy-server/src/main.rs (use devs:rust-dev agent)
-- [ ] T300 [P] Implement input text size validation (64KB max) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T299 [P] Implement config file permission warning in crates/yappy-server/src/main.rs (use devs:rust-dev agent)
+- [x] T300 [P] Implement input text size validation (64KB max) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T301 [GIT] Commit: add security validations
 
 ### Observability

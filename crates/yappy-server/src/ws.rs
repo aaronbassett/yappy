@@ -199,8 +199,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Get audio channel capacity from config (for backpressure)
     let audio_channel_capacity = state.config().server.audio_channel_capacity;
+
+    // Get max text size from config (FR-008: reasonable size limits on text chunks)
+    let max_text_size = state.config().server.max_text_size();
+
     debug!(
         audio_channel_capacity,
+        max_text_size,
         idle_timeout_secs = idle_timeout.as_secs(),
         session_init_timeout_secs = session_init_timeout.as_secs(),
         synthesis_timeout_secs = synthesis_timeout.as_secs(),
@@ -320,6 +325,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             &buffer_config,
                             &session_guard,
                             synthesis_timeout,
+                            max_text_size,
                         ).await {
                             // Connection should be closed
                             break;
@@ -1865,6 +1871,8 @@ where
 /// * `buffer_config` - Buffer configuration for new sessions
 /// * `session_guard` - Session guard for accessing cancellation tokens
 /// * `synthesis_timeout` - Maximum time for synthesis operations
+/// * `max_text_size` - Maximum allowed text message size in bytes (FR-008)
+#[allow(clippy::too_many_arguments)]
 async fn process_message_with_cancellation_and_timeout<S>(
     message: Message,
     sender: &mut BackpressureSender<S>,
@@ -1873,6 +1881,7 @@ async fn process_message_with_cancellation_and_timeout<S>(
     buffer_config: &BufferConfig,
     session_guard: &SessionGuard,
     synthesis_timeout: Duration,
+    max_text_size: usize,
 ) -> bool
 where
     S: SinkExt<Message> + Unpin,
@@ -1880,6 +1889,29 @@ where
 {
     match message {
         Message::Text(text) => {
+            // Validate text message size (FR-008: reasonable size limits on text chunks)
+            if text.len() > max_text_size {
+                warn!(
+                    message_size = text.len(),
+                    max_size = max_text_size,
+                    "Text message exceeds maximum allowed size"
+                );
+                let response = ServerMessage::error(
+                    "message_too_large",
+                    format!(
+                        "Text message size ({} bytes) exceeds maximum allowed size ({} bytes)",
+                        text.len(),
+                        max_text_size
+                    ),
+                );
+                if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                    warn!("Failed to send size limit error: {}", err);
+                    return false;
+                }
+                // Return true to continue the message loop - this is a non-fatal error
+                return true;
+            }
+
             handle_text_message_with_timeout(
                 &text,
                 sender,

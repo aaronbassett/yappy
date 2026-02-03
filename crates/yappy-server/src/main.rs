@@ -3,12 +3,16 @@
 //! A standalone server that accepts streaming text input via WebSocket
 //! and produces near-realtime audio output through pluggable TTS providers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
+
+/// Maximum permissions allowed for config file on Unix (0600 = owner read/write only)
+#[cfg(unix)]
+const MAX_SAFE_PERMISSIONS: u32 = 0o600;
 
 use yappy_server::create_router;
 use yappy_server::shutdown::{ShutdownCoordinator, DEFAULT_DRAIN_TIMEOUT};
@@ -50,6 +54,9 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting Yappy TTS Server");
     info!("Config file: {}", args.config.display());
+
+    // Check config file permissions before loading (FR-014)
+    check_config_file_permissions(&args.config);
 
     // Load configuration
     let config = yappy_core::Config::load(&args.config)?;
@@ -157,4 +164,55 @@ async fn shutdown_signal(coordinator: Arc<ShutdownCoordinator>) {
 
     // Initiate graceful shutdown - this cancels the token that all sessions monitor
     coordinator.initiate_shutdown();
+}
+
+/// Check if the config file has overly permissive permissions (FR-014).
+///
+/// On Unix systems, warns if the config file permissions are more permissive
+/// than 0600 (owner read/write only). This is a security concern because the
+/// config file may contain sensitive data like API keys.
+///
+/// On Windows, this check is a no-op as permission models differ.
+///
+/// # Arguments
+///
+/// * `path` - Path to the configuration file
+#[cfg(unix)]
+fn check_config_file_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::metadata(path) {
+        Ok(metadata) => {
+            let mode = metadata.permissions().mode();
+            // Extract the permission bits (lowest 9 bits: rwxrwxrwx)
+            let perms = mode & 0o777;
+
+            if perms > MAX_SAFE_PERMISSIONS {
+                warn!(
+                    path = %path.display(),
+                    current_mode = format!("{:04o}", perms),
+                    recommended_mode = format!("{:04o}", MAX_SAFE_PERMISSIONS),
+                    "Config file has overly permissive permissions. \
+                     Consider running: chmod 600 {}",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => {
+            // Don't fail startup if we can't check permissions - the file
+            // might not exist yet or we might not have permission to stat it.
+            // The actual config loading will handle these cases.
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "Could not check config file permissions"
+            );
+        }
+    }
+}
+
+/// No-op permission check for non-Unix platforms.
+#[cfg(not(unix))]
+fn check_config_file_permissions(_path: &Path) {
+    // Windows has a different permission model; skip this check
 }
