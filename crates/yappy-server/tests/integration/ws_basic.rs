@@ -821,7 +821,8 @@ async fn test_ws_ping_pong() {
 
     // We may receive a Pong frame back - consume it if present
     // (Axum responds with Pong, and tokio-tungstenite may surface it)
-    if let Ok(Some(Ok(Message::Pong(data)))) = timeout(Duration::from_millis(100), ws.next()).await {
+    if let Ok(Some(Ok(Message::Pong(data)))) = timeout(Duration::from_millis(100), ws.next()).await
+    {
         // Pong payload should match ping payload
         assert_eq!(data.as_ref(), &[1, 2, 3]);
     } else {

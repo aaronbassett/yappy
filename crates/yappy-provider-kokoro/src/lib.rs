@@ -1729,10 +1729,7 @@ mod tests {
 
         // Total duration should be reasonable (at least 100ms for "Hello world")
         let total_duration: u32 = chunks.iter().map(|c| c.duration_ms).sum();
-        assert!(
-            total_duration > 100,
-            "Audio too short: {total_duration}ms"
-        );
+        assert!(total_duration > 100, "Audio too short: {total_duration}ms");
     }
 
     /// Full synthesis integration test with Opus encoding.
