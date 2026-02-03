@@ -30,7 +30,9 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tracing::{debug, info, instrument, warn};
 use yappy_core::provider::ProviderId;
-use yappy_core::{AudioFormat, ClientMessage, CodeBlockMode, ServerMessage, Session, VoiceConfig};
+use yappy_core::{
+    AudioFormat, ClientMessage, CodeBlockMode, ServerMessage, Session, SessionState, VoiceConfig,
+};
 
 use crate::state::{AppState, ProviderRegistry};
 
@@ -223,11 +225,11 @@ where
                     )
                     .await
                 }
-                ClientMessage::Text { .. } => {
+                ClientMessage::Text { content } => {
                     debug!(message_type = "text", "Received client message");
 
                     // Check if session is initialized
-                    if session.is_none() {
+                    let Some(session) = session.as_mut() else {
                         let response = ServerMessage::error(
                             "no_session",
                             "No active session - send session.init first",
@@ -236,17 +238,36 @@ where
                             warn!("Failed to send response: {}", err);
                             return false;
                         }
-                    } else {
-                        // Text message handling will be implemented in a later task
-                        let response = ServerMessage::error(
-                            "not_implemented",
-                            "Text processing not yet implemented",
+                        return true;
+                    };
+
+                    // Update last activity timestamp
+                    session.touch();
+
+                    // Transition to Streaming state on first text message
+                    if session.state == SessionState::Ready {
+                        session.state = SessionState::Streaming;
+                        debug!(
+                            session_id = %session.id,
+                            "Session transitioned to Streaming state"
                         );
-                        if let Err(err) = send_server_message(sender, &response).await {
-                            warn!("Failed to send response: {}", err);
-                            return false;
-                        }
                     }
+
+                    // Push content to sentence buffer and extract complete sentences
+                    let sentences = session.buffer.push(&content);
+
+                    // Log sentence count (never log actual text content - privacy requirement)
+                    if !sentences.is_empty() {
+                        debug!(
+                            session_id = %session.id,
+                            sentence_count = sentences.len(),
+                            "Extracted sentences from buffer"
+                        );
+                    }
+
+                    // Sentences are extracted but not processed yet - synthesis comes later
+                    // No response is sent for successful text processing
+
                     true
                 }
                 ClientMessage::TextDone => {
@@ -1038,23 +1059,95 @@ mod tests {
             handle_text_message(init_text, &mut sink, &mut session, &registry).await;
         assert!(should_continue);
         assert!(session.is_some());
+        assert_eq!(session.as_ref().unwrap().state, SessionState::Ready);
 
         sink.messages.clear();
 
-        // Send text (should get "not implemented" since text handling is for later)
-        let text_msg = r#"{"type":"text","content":"Hello"}"#;
+        // Send text - should succeed without sending a response
+        let text_msg = r#"{"type":"text","content":"Hello world."}"#;
         let should_continue =
             handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
         assert!(should_continue);
 
-        if let Message::Text(json) = &sink.messages[0] {
-            let msg: ServerMessage = serde_json::from_str(json).unwrap();
-            // Should be "not_implemented" rather than "no_session"
-            if let ServerMessage::Error { code, .. } = msg {
-                assert_eq!(code, "not_implemented");
-            } else {
-                panic!("Expected Error message");
-            }
-        }
+        // No response expected for successful text message processing
+        assert!(sink.messages.is_empty());
+
+        // Session state should transition to Streaming
+        assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
+    }
+
+    #[tokio::test]
+    async fn test_text_message_extracts_sentences() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry();
+
+        // Initialize session
+        let init_text = r#"{"type":"session.init"}"#;
+        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        sink.messages.clear();
+
+        // Send text with multiple sentences
+        let text_msg = r#"{"type":"text","content":"First sentence. Second sentence. Third"}"#;
+        let should_continue =
+            handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        assert!(should_continue);
+
+        // No response expected
+        assert!(sink.messages.is_empty());
+
+        // Buffer should contain the incomplete part ("Third")
+        assert!(!session.as_ref().unwrap().buffer.is_empty());
+        assert_eq!(session.as_ref().unwrap().buffer.current_buffer(), "Third");
+    }
+
+    #[tokio::test]
+    async fn test_text_message_updates_last_activity() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry();
+
+        // Initialize session
+        let init_text = r#"{"type":"session.init"}"#;
+        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+
+        let initial_activity = session.as_ref().unwrap().last_activity;
+
+        // Small delay to ensure time difference
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        sink.messages.clear();
+
+        // Send text
+        let text_msg = r#"{"type":"text","content":"Test"}"#;
+        handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+
+        // last_activity should be updated
+        assert!(session.as_ref().unwrap().last_activity > initial_activity);
+    }
+
+    #[tokio::test]
+    async fn test_text_message_state_stays_streaming_on_subsequent_messages() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry();
+
+        // Initialize session
+        let init_text = r#"{"type":"session.init"}"#;
+        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        sink.messages.clear();
+
+        // First text message - transitions to Streaming
+        let text_msg1 = r#"{"type":"text","content":"First. "}"#;
+        handle_text_message(text_msg1, &mut sink, &mut session, &registry).await;
+        assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
+
+        // Second text message - stays in Streaming
+        let text_msg2 = r#"{"type":"text","content":"Second. "}"#;
+        handle_text_message(text_msg2, &mut sink, &mut session, &registry).await;
+        assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
+
+        // No responses expected
+        assert!(sink.messages.is_empty());
     }
 }
