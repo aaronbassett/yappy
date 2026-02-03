@@ -18,8 +18,9 @@ use tower_http::{
     propagate_header::PropagateHeaderLayer,
     request_id::{MakeRequestUuid, SetRequestIdLayer},
 };
-use yappy_core::{ProviderMetadata, ProviderStatus};
+use yappy_core::ProviderStatus;
 
+use crate::handlers::providers::list_providers;
 use crate::state::AppState;
 use crate::ws::ws_upgrade_handler;
 
@@ -54,7 +55,7 @@ pub fn create_router(state: AppState) -> Router {
 
     Router::new()
         .route("/health", get(health_handler))
-        .route("/providers", get(providers_handler))
+        .route("/providers", get(list_providers))
         .route("/ws", any(ws_upgrade_handler))
         .layer(PropagateHeaderLayer::new(x_request_id.clone()))
         .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid))
@@ -92,30 +93,6 @@ pub enum HealthStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderStatusResponse {
     /// Provider status: "available", `not_configured`, or "unavailable"
-    #[serde(flatten)]
-    pub status: ProviderStatus,
-}
-
-/// Provider list response
-///
-/// Returned by `GET /providers` endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProvidersResponse {
-    /// List of all provider metadata
-    pub providers: Vec<ProviderWithStatus>,
-
-    /// ID of the default provider
-    pub default_provider: Option<String>,
-}
-
-/// Provider metadata with current status
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderWithStatus {
-    /// Provider metadata (id, name, description, voices, etc.)
-    #[serde(flatten)]
-    pub metadata: ProviderMetadata,
-
-    /// Current provider status
     #[serde(flatten)]
     pub status: ProviderStatus,
 }
@@ -186,55 +163,6 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
     }
 }
 
-/// List providers handler
-///
-/// Returns metadata for all registered TTS providers including their
-/// capabilities, voices, and supported audio formats.
-///
-/// # Response
-///
-/// Always returns `200 OK` with the provider list.
-///
-/// # Example Response
-///
-/// ```json
-/// {
-///   "providers": [
-///     {
-///       "id": "kokoro",
-///       "name": "Kokoro 82M",
-///       "status": "available",
-///       "voices": [...]
-///     }
-///   ],
-///   "default_provider": "kokoro"
-/// }
-/// ```
-pub async fn providers_handler(State(state): State<AppState>) -> Json<ProvidersResponse> {
-    let registry = state.providers();
-
-    // Collect provider metadata with status
-    let mut providers = Vec::new();
-    for metadata in registry.list() {
-        let status = if let Some(provider) = registry.get(&metadata.id) {
-            provider.health_check().await
-        } else {
-            ProviderStatus::Unavailable {
-                reason: "Provider not found".to_string(),
-            }
-        };
-
-        providers.push(ProviderWithStatus { metadata, status });
-    }
-
-    let default_provider = registry.default_provider().map(|id| id.0);
-
-    Json(ProvidersResponse {
-        providers,
-        default_provider,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,11 +176,12 @@ mod tests {
         audio::{AudioFormat, AudioStream},
         config::Config,
         error::ProviderError,
-        provider::ProviderId,
+        provider::{ProviderId, ProviderMetadata},
         session::VoiceConfig,
         TtsProvider,
     };
 
+    use crate::handlers::providers::ProvidersResponse;
     use crate::state::ProviderRegistry;
 
     /// Mock TTS provider for testing
@@ -326,8 +255,10 @@ mod tests {
     fn create_test_state_with_provider(provider: impl TtsProvider + 'static) -> AppState {
         let config = create_test_config();
         let mut registry = ProviderRegistry::new();
+        let id = ProviderId::new("test");
         registry.register(provider);
-        registry.set_default(ProviderId::new("test"));
+        registry.record_status(id.clone(), ProviderStatus::Available);
+        registry.set_default(id);
         AppState::new(config, registry)
     }
 
@@ -393,11 +324,18 @@ mod tests {
         let config = create_test_config();
         let mut registry = ProviderRegistry::new();
         registry.register(MockProvider::new("available", "Available"));
+        registry.record_status(ProviderId::new("available"), ProviderStatus::Available);
         registry.register(MockProvider::unavailable(
             "broken",
             "Broken",
             "Test failure",
         ));
+        registry.record_status(
+            ProviderId::new("broken"),
+            ProviderStatus::Unavailable {
+                reason: "Test failure".to_string(),
+            },
+        );
         let state = AppState::new(config, registry);
         let app = create_router(state);
 
@@ -444,7 +382,6 @@ mod tests {
         let providers: ProvidersResponse = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(providers.providers.len(), 1);
-        assert_eq!(providers.providers[0].metadata.id.0, "test");
         assert_eq!(providers.default_provider, Some("test".to_string()));
     }
 

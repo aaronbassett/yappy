@@ -6,9 +6,11 @@
 //! This library crate exposes the core server components for testing and reuse.
 
 pub mod app;
+pub mod handlers;
 pub mod state;
 pub mod ws;
 
 pub use app::create_router;
+pub use handlers::list_providers;
 pub use state::{AppState, ProviderRegistry};
 pub use ws::ws_upgrade_handler;
