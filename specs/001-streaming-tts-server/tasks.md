@@ -443,9 +443,9 @@
 **Independent Test**: Open 10 concurrent connections, stream different text, verify all complete correctly
 
 ### Phase Start
-- [ ] T227 [GIT] Verify working tree is clean before starting Phase 10
-- [ ] T228 [GIT] Pull and rebase on origin/main if needed
-- [ ] T229 [US8] Create specs/001-streaming-tts-server/retro/P10.md for this phase
+- [x] T227 [GIT] Verify working tree is clean before starting Phase 10
+- [x] T228 [GIT] Pull and rebase on origin/main if needed (already up to date)
+- [x] T229 [US8] Create specs/001-streaming-tts-server/retro/P10.md for this phase
 - [ ] T230 [GIT] Commit: initialize phase 10 retro
 
 ### Concurrency
