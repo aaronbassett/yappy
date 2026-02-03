@@ -167,9 +167,9 @@
 - [x] T087 [GIT] Commit: finalize phase 3 retro
 
 ### Phase Completion
-- [ ] T088 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T089 [GIT] Create/update PR to main with phase summary
-- [ ] T090 [GIT] Verify all CI checks pass
+- [x] T088 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [x] T089 [GIT] Create/update PR to main with phase summary (added comment to PR #1)
+- [ ] T090 [GIT] Verify all CI checks pass (CI pending)
 - [ ] T091 [GIT] Report PR ready status
 
 **Checkpoint**: MVP complete - Basic streaming TTS works end-to-end

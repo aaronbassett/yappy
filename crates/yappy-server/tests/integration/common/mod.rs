@@ -9,6 +9,7 @@ pub mod server;
 
 // Re-export commonly used items
 pub use mock::{MockSynthesisMode, MockTtsProvider};
+#[allow(unused_imports)]
 pub use server::{
     connect_ws, connect_ws_with_timeout, spawn_empty_server, spawn_test_server, TestServer,
     TestServerBuilder,
@@ -135,6 +136,7 @@ where
 /// Send text and collect all resulting audio chunks
 ///
 /// Returns a vector of audio chunks received.
+#[allow(dead_code)]
 pub async fn send_text_and_collect_audio<S>(
     ws: &mut S,
     text: &str,

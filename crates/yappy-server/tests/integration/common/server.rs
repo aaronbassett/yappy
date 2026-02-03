@@ -193,6 +193,7 @@ pub async fn connect_ws(
 }
 
 /// Connect to a test server with timeout
+#[allow(dead_code)]
 pub async fn connect_ws_with_timeout(
     server: &TestServer,
     timeout_duration: Duration,

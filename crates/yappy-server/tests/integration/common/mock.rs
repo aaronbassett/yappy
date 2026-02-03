@@ -20,6 +20,7 @@ use yappy_core::{
 
 /// Configuration for mock synthesis behavior
 #[derive(Clone)]
+#[allow(dead_code)]
 pub enum MockSynthesisMode {
     /// Return a fixed number of audio chunks per sentence
     Success {
@@ -227,11 +228,13 @@ impl TtsProvider for MockTtsProvider {
 }
 
 /// Create a thread-safe mock provider wrapped in Arc
+#[allow(dead_code)]
 pub fn create_mock_provider(id: &str) -> Arc<MockTtsProvider> {
     Arc::new(MockTtsProvider::new(id))
 }
 
 /// Create a failing mock provider
+#[allow(dead_code)]
 pub fn create_failing_provider(id: &str, error: &str) -> MockTtsProvider {
     MockTtsProvider::new(id).with_synthesis_mode(MockSynthesisMode::FailInit {
         error: error.to_string(),
