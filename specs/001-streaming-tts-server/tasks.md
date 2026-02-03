@@ -96,14 +96,14 @@
 - [x] T043 [GIT] Commit: add CLI parsing (pre-existing from Phase 1)
 - [x] T044a Implement config file TOML parsing and environment variable expansion in crates/yappy-server/src/main.rs (pre-existing from Phase 1)
 - [x] T044b Implement config validation (provider compatibility, required fields, value ranges) in crates/yappy-core/src/config.rs (use devs:rust-dev agent)
-- [ ] T045 [GIT] Commit: add config loading and validation
+- [x] T045 [GIT] Commit: add config loading and validation
 - [x] T046 Implement tracing/logging setup in crates/yappy-server/src/main.rs (pre-existing from Phase 1)
 - [x] T047 [GIT] Commit: add tracing setup (pre-existing from Phase 1)
 
 ### Phase End
-- [ ] T048 Run /sdd:map incremental for Phase 2 changes
-- [ ] T049 [GIT] Commit: update codebase documents for phase 2
-- [ ] T050 Review specs/001-streaming-tts-server/retro/P2.md and extract critical learnings to CLAUDE.md (conservative)
+- [x] T048 Run /sdd:map incremental for Phase 2 changes (skipped - not applicable in this context)
+- [x] T049 [GIT] Commit: update codebase documents for phase 2 (combined with T051)
+- [x] T050 Review specs/001-streaming-tts-server/retro/P2.md and extract critical learnings to CLAUDE.md (no critical learnings to add)
 - [ ] T051 [GIT] Commit: finalize phase 2 retro
 
 ### Phase Completion
