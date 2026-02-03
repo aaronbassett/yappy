@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 yappy-core = { workspace = true }
+yappy-provider-kokoro = { workspace = true, optional = true }
 
 # Web framework
 axum = { workspace = true }
@@ -46,7 +47,7 @@ futures-util = "0.3"
 
 [features]
 default = ["kokoro"]
-kokoro = []
+kokoro = ["dep:yappy-provider-kokoro"]
 openai-tts = []
 avspeech = []
 all-providers = ["kokoro", "openai-tts", "avspeech"]

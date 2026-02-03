@@ -151,6 +151,184 @@ impl std::fmt::Debug for ProviderRegistry {
     }
 }
 
+/// Register all enabled TTS providers based on feature flags and configuration.
+///
+/// This function creates a `ProviderRegistry` and populates it with all TTS providers
+/// that are:
+/// 1. Enabled via Cargo feature flags (e.g., `kokoro`, `openai-tts`, `avspeech`)
+/// 2. Configured in the provided `Config`
+///
+/// Providers that fail to initialize are logged as warnings and skipped, allowing
+/// the server to start with a subset of available providers.
+///
+/// # Arguments
+///
+/// * `config` - Server configuration containing provider settings
+///
+/// # Returns
+///
+/// A `ProviderRegistry` containing all successfully initialized providers.
+/// If no providers could be initialized, an empty registry is returned.
+///
+/// # Example
+///
+/// ```ignore
+/// let config = Config::load_default()?;
+/// let registry = register_providers(&config).await;
+///
+/// if registry.is_empty() {
+///     tracing::warn!("No TTS providers available");
+/// }
+/// ```
+// Allow unused_async when no provider features are enabled, as the function
+// becomes non-async in that case but we want a consistent API.
+#[allow(clippy::unused_async)]
+pub async fn register_providers(config: &yappy_core::Config) -> ProviderRegistry {
+    use tracing::{debug, info, warn};
+
+    let mut registry = ProviderRegistry::new();
+
+    info!("Registering TTS providers based on feature flags");
+
+    // Register Kokoro provider if feature is enabled
+    #[cfg(feature = "kokoro")]
+    {
+        debug!("Kokoro feature enabled, attempting to register provider");
+        match register_kokoro_provider(config).await {
+            Ok(provider) => {
+                info!("Kokoro provider registered successfully");
+                registry.register(provider);
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to initialize Kokoro provider, skipping");
+            }
+        }
+    }
+
+    #[cfg(not(feature = "kokoro"))]
+    {
+        debug!("Kokoro feature not enabled");
+    }
+
+    // Register OpenAI provider if feature is enabled
+    // TODO: Implement when yappy-provider-openai crate exists
+    #[cfg(feature = "openai-tts")]
+    {
+        debug!("OpenAI TTS feature enabled, but provider not yet implemented");
+        // When implemented:
+        // match register_openai_provider(config).await {
+        //     Ok(provider) => {
+        //         info!("OpenAI provider registered successfully");
+        //         registry.register(provider);
+        //     }
+        //     Err(e) => {
+        //         warn!(error = %e, "Failed to initialize OpenAI provider, skipping");
+        //     }
+        // }
+    }
+
+    // Register AVSpeech provider if feature is enabled (macOS only)
+    // TODO: Implement when yappy-provider-avspeech crate exists
+    #[cfg(feature = "avspeech")]
+    {
+        debug!("AVSpeech feature enabled, but provider not yet implemented");
+        // When implemented:
+        // match register_avspeech_provider(config).await {
+        //     Ok(provider) => {
+        //         info!("AVSpeech provider registered successfully");
+        //         registry.register(provider);
+        //     }
+        //     Err(e) => {
+        //         warn!(error = %e, "Failed to initialize AVSpeech provider, skipping");
+        //     }
+        // }
+    }
+
+    // Set default provider from config
+    let default_id = ProviderId::new(&config.providers.default);
+    if registry.contains(&default_id) {
+        registry.set_default(default_id.clone());
+        info!(default = %default_id.0, "Default provider set");
+    } else if !registry.is_empty() {
+        // Fall back to first available provider
+        if let Some(first) = registry.list().first() {
+            let fallback_id = first.id.clone();
+            warn!(
+                requested = %config.providers.default,
+                fallback = %fallback_id.0,
+                "Requested default provider not available, using fallback"
+            );
+            registry.set_default(fallback_id);
+        }
+    } else {
+        warn!("No TTS providers registered, server will have limited functionality");
+    }
+
+    info!(
+        num_providers = registry.len(),
+        default = ?registry.default_provider().map(|p| p.0),
+        "Provider registration complete"
+    );
+
+    registry
+}
+
+/// Register the Kokoro ONNX TTS provider.
+///
+/// Creates and initializes a Kokoro provider based on the configuration.
+/// The provider will download the model from `HuggingFace` on first use if
+/// `model_path` is set to "auto" or not specified.
+#[cfg(feature = "kokoro")]
+async fn register_kokoro_provider(
+    config: &yappy_core::Config,
+) -> Result<yappy_provider_kokoro::KokoroProvider, yappy_core::error::ProviderError> {
+    use std::path::PathBuf;
+    use tracing::debug;
+    use yappy_provider_kokoro::{KokoroConfig, KokoroProvider};
+
+    // Build Kokoro configuration from server config
+    let kokoro_config = config.providers.kokoro.as_ref().map_or_else(
+        || {
+            debug!("Using default Kokoro configuration");
+            KokoroConfig::default()
+        },
+        |cfg| {
+            let model_path = if cfg.model_path == "auto" {
+                None
+            } else {
+                Some(PathBuf::from(&cfg.model_path))
+            };
+
+            let voices_path = if cfg.voices_path == "auto" {
+                None
+            } else {
+                Some(PathBuf::from(&cfg.voices_path))
+            };
+
+            debug!(
+                model_path = ?model_path,
+                voices_path = ?voices_path,
+                "Using custom Kokoro configuration"
+            );
+
+            KokoroConfig {
+                model_path,
+                voices_path,
+                default_voice: "af_bella".to_string(),
+            }
+        },
+    );
+
+    // Create and initialize the provider
+    let provider = KokoroProvider::new(kokoro_config);
+
+    // Load the model (this may download from HuggingFace)
+    debug!("Loading Kokoro model (this may download on first run)");
+    provider.load_model().await?;
+
+    Ok(provider)
+}
+
 /// Application state shared across Axum handlers
 ///
 /// This struct holds all the shared state needed by the server:

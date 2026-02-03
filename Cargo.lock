@@ -2734,6 +2734,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "yappy-core",
+ "yappy-provider-kokoro",
 ]
 
 [[package]]
