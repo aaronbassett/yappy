@@ -713,6 +713,7 @@ impl std::fmt::Debug for AppState {
 }
 
 #[cfg(test)]
+#[allow(clippy::significant_drop_tightening)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
