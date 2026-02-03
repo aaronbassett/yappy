@@ -313,7 +313,7 @@ mod tests {
             Self {
                 id: id.to_string(),
                 name: name.to_string(),
-                description: format!("Mock {} provider", name),
+                description: format!("Mock {name} provider"),
                 voices: vec![VoiceInfo {
                     id: "voice1".to_string(),
                     name: "Test Voice".to_string(),
@@ -563,7 +563,7 @@ mod tests {
                 "opus" => {
                     assert_eq!(format.sample_rates, vec![48000]);
                 }
-                other => panic!("Unexpected codec: {}", other),
+                other => panic!("Unexpected codec: {other}"),
             }
         }
     }
