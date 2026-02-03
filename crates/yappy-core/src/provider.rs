@@ -92,7 +92,7 @@ pub enum ProviderStatus {
 
 impl ProviderStatus {
     /// Check if provider is available
-    pub fn is_available(&self) -> bool {
+    pub const fn is_available(&self) -> bool {
         matches!(self, Self::Available)
     }
 }

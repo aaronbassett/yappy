@@ -60,7 +60,7 @@ pub enum ProviderError {
 
 impl ProviderError {
     /// Get error code for protocol messages
-    pub fn code(&self) -> &'static str {
+    pub const fn code(&self) -> &'static str {
         match self {
             Self::SynthesisFailed { .. } => "synthesis_failed",
             Self::RateLimited { .. } => "rate_limited",
@@ -74,7 +74,7 @@ impl ProviderError {
     }
 
     /// Check if this is a fatal error (should close connection)
-    pub fn is_fatal(&self) -> bool {
+    pub const fn is_fatal(&self) -> bool {
         matches!(self, Self::Internal(_))
     }
 }
@@ -112,7 +112,7 @@ pub enum SessionError {
 
 impl SessionError {
     /// Get error code for protocol messages
-    pub fn code(&self) -> &'static str {
+    pub const fn code(&self) -> &'static str {
         match self {
             Self::ProtocolViolation { .. } => "protocol_violation",
             Self::ProviderUnavailable { .. } => "provider_unavailable",
@@ -162,7 +162,9 @@ impl From<&SessionError> for ErrorResponse {
             fatal: true,
             sentence_index: None,
             alternatives: match err {
-                SessionError::ProviderUnavailable { alternatives, .. } => Some(alternatives.clone()),
+                SessionError::ProviderUnavailable { alternatives, .. } => {
+                    Some(alternatives.clone())
+                }
                 _ => None,
             },
         }

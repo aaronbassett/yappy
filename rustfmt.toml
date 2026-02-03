@@ -5,25 +5,24 @@ edition = "2021"
 
 # Line width
 max_width = 100
-comment_width = 100
-wrap_comments = true
 
-# Imports
-imports_granularity = "Crate"
-group_imports = "StdExternalCrate"
+# Imports (stable options only)
 reorder_imports = true
 reorder_modules = true
 
-# Formatting
-use_small_heuristics = "Default"
-fn_single_line = false
-where_single_line = false
-force_multiline_blocks = false
-
-# Misc
-format_code_in_doc_comments = true
-format_macro_matchers = true
-format_strings = false
+# Misc (stable options only)
 newline_style = "Unix"
 use_field_init_shorthand = true
 use_try_shorthand = true
+
+# Note: The following options require nightly rustfmt:
+# wrap_comments = true
+# comment_width = 100
+# imports_granularity = "Crate"
+# group_imports = "StdExternalCrate"
+# fn_single_line = false
+# where_single_line = false
+# force_multiline_blocks = false
+# format_code_in_doc_comments = true
+# format_macro_matchers = true
+# format_strings = false

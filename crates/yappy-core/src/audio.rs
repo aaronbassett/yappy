@@ -75,7 +75,7 @@ pub struct AudioChunk {
 
 impl AudioChunk {
     /// Create a new audio chunk
-    pub fn new(sequence: u32, sentence_index: u32, data: Bytes, duration_ms: u32) -> Self {
+    pub const fn new(sequence: u32, sentence_index: u32, data: Bytes, duration_ms: u32) -> Self {
         Self {
             sequence,
             sentence_index,
@@ -86,7 +86,7 @@ impl AudioChunk {
 
     /// Serialize to binary WebSocket frame format
     ///
-    /// Format: [sequence:u32][sentence_index:u32][duration_ms:u32][data...]
+    /// Format: `[sequence:u32][sentence_index:u32][duration_ms:u32][data...]`
     pub fn to_binary_frame(&self) -> Bytes {
         let mut buf = Vec::with_capacity(12 + self.data.len());
         buf.extend_from_slice(&self.sequence.to_le_bytes());
@@ -97,7 +97,7 @@ impl AudioChunk {
     }
 
     /// Parse from binary WebSocket frame format
-    pub fn from_binary_frame(data: Bytes) -> Option<Self> {
+    pub fn from_binary_frame(data: &Bytes) -> Option<Self> {
         if data.len() < 12 {
             return None;
         }

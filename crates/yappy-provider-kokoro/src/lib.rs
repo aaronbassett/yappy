@@ -1,7 +1,7 @@
 //! Kokoro ONNX TTS Provider
 //!
 //! Local TTS using the Kokoro 82M ONNX model.
-//! Downloads model from HuggingFace on first use.
+//! Downloads model from `HuggingFace` on first use.
 
 #![warn(missing_docs)]
 

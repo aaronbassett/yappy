@@ -46,7 +46,7 @@ fn default_host() -> String {
     "127.0.0.1".to_string()
 }
 
-fn default_port() -> u16 {
+const fn default_port() -> u16 {
     3000
 }
 
@@ -54,11 +54,11 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-fn default_idle_timeout() -> u64 {
+const fn default_idle_timeout() -> u64 {
     300
 }
 
-fn default_synthesis_timeout() -> u64 {
+const fn default_synthesis_timeout() -> u64 {
     30
 }
 
@@ -81,12 +81,12 @@ impl ServerConfig {
     }
 
     /// Get idle timeout as Duration
-    pub fn idle_timeout(&self) -> Duration {
+    pub const fn idle_timeout(&self) -> Duration {
         Duration::from_secs(self.idle_timeout_secs)
     }
 
     /// Get synthesis timeout as Duration
-    pub fn synthesis_timeout(&self) -> Duration {
+    pub const fn synthesis_timeout(&self) -> Duration {
         Duration::from_secs(self.synthesis_timeout_secs)
     }
 }
@@ -97,20 +97,20 @@ pub struct ProvidersConfig {
     /// Default provider ID
     pub default: String,
 
-    /// OpenAI provider settings
+    /// `OpenAI` provider settings
     pub openai: Option<OpenAiConfig>,
 
     /// Kokoro provider settings
     pub kokoro: Option<KokoroConfig>,
 
-    /// AVSpeech provider settings (macOS only)
+    /// `AVSpeech` provider settings (macOS only)
     pub avspeech: Option<AvSpeechConfig>,
 }
 
-/// OpenAI TTS provider settings
+/// `OpenAI` TTS provider settings
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenAiConfig {
-    /// API key (supports $ENV_VAR syntax)
+    /// API key (supports `$ENV_VAR` syntax)
     pub api_key: String,
 
     /// Model to use (default: "tts-1")
@@ -159,7 +159,7 @@ impl Default for KokoroConfig {
     }
 }
 
-/// macOS AVSpeechSynthesizer settings
+/// macOS `AVSpeechSynthesizer` settings
 #[derive(Debug, Clone, Deserialize)]
 pub struct AvSpeechConfig {
     /// Whether to enable (default: true on macOS)
@@ -167,7 +167,7 @@ pub struct AvSpeechConfig {
     pub enabled: bool,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -189,11 +189,11 @@ pub struct BufferConfigToml {
     pub max_size_bytes: usize,
 }
 
-fn default_flush_timeout() -> u64 {
+const fn default_flush_timeout() -> u64 {
     500
 }
 
-fn default_max_size() -> usize {
+const fn default_max_size() -> usize {
     4096
 }
 

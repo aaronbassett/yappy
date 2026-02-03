@@ -1,6 +1,6 @@
-//! macOS AVSpeechSynthesizer Provider
+//! macOS `AVSpeechSynthesizer` Provider
 //!
-//! Native macOS TTS using AVFoundation's AVSpeechSynthesizer.
+//! Native macOS TTS using `AVFoundation`'s `AVSpeechSynthesizer`.
 //! Only available on macOS targets.
 
 #![warn(missing_docs)]

@@ -135,11 +135,11 @@ pub struct VoiceConfig {
     pub volume: f32,
 }
 
-fn default_speed() -> f32 {
+const fn default_speed() -> f32 {
     1.0
 }
 
-fn default_volume() -> f32 {
+const fn default_volume() -> f32 {
     1.0
 }
 
