@@ -599,13 +599,13 @@
 - [x] T309 Run /sdd:map incremental for Phase 13 changes (skipped - not applicable in this context)
 - [x] T310 [GIT] Commit: update codebase documents for phase 13 (combined with T312)
 - [x] T311 Review specs/001-streaming-tts-server/retro/P13.md and extract critical learnings to CLAUDE.md (no updates needed - internal improvements)
-- [ ] T312 [GIT] Commit: finalize phase 13 retro
+- [x] T312 [GIT] Commit: finalize phase 13 retro
 
 ### Phase Completion
-- [ ] T313 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T314 [GIT] Create/update PR to main with phase summary
-- [ ] T315 [GIT] Verify all CI checks pass
-- [ ] T316 [GIT] Report PR ready status
+- [x] T313 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [x] T314 [GIT] Create/update PR to main with phase summary (added comment to PR #1)
+- [x] T315 [GIT] Verify all CI checks pass (all 4 checks passing: Check, Build ubuntu, Build macos, Build macOS all features)
+- [x] T316 [GIT] Report PR ready status (PR #1 ready for review)
 
 ---
 
