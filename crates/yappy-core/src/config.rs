@@ -104,6 +104,16 @@ impl ServerConfig {
     }
 }
 
+/// Default max concurrent synthesis operations per provider
+const DEFAULT_MAX_CONCURRENT_SYNTHESIS: usize = 4;
+
+/// Maximum allowed concurrent synthesis operations per provider
+const MAX_CONCURRENT_SYNTHESIS_LIMIT: usize = 64;
+
+const fn default_max_concurrent_synthesis() -> usize {
+    DEFAULT_MAX_CONCURRENT_SYNTHESIS
+}
+
 /// Provider configuration section
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProvidersConfig {
@@ -118,6 +128,15 @@ pub struct ProvidersConfig {
 
     /// `AVSpeech` provider settings (macOS only)
     pub avspeech: Option<AvSpeechConfig>,
+
+    /// Maximum concurrent synthesis operations per provider (default: 4)
+    ///
+    /// This limits how many simultaneous synthesis requests can be processed
+    /// by each provider to prevent resource exhaustion. When the limit is reached,
+    /// new requests will wait until a slot becomes available.
+    /// Valid range: 1-64.
+    #[serde(default = "default_max_concurrent_synthesis")]
+    pub max_concurrent_synthesis: usize,
 }
 
 /// `OpenAI` TTS provider settings
@@ -315,6 +334,20 @@ impl Config {
         // Note: Kokoro path validation is intentionally not done here.
         // If the path is not "auto", actual file existence is checked at runtime.
 
+        // Validate max_concurrent_synthesis (1-64)
+        if self.providers.max_concurrent_synthesis == 0 {
+            return Err(ConfigValidationError::InvalidMaxConcurrentSynthesis {
+                value: 0,
+                reason: "must be > 0".to_string(),
+            });
+        }
+        if self.providers.max_concurrent_synthesis > MAX_CONCURRENT_SYNTHESIS_LIMIT {
+            return Err(ConfigValidationError::InvalidMaxConcurrentSynthesis {
+                value: self.providers.max_concurrent_synthesis,
+                reason: format!("must be <= {MAX_CONCURRENT_SYNTHESIS_LIMIT}"),
+            });
+        }
+
         Ok(())
     }
 
@@ -430,6 +463,15 @@ pub enum ConfigValidationError {
     /// Empty API key for `OpenAI`
     #[error("OpenAI API key is empty or not set")]
     EmptyApiKey,
+
+    /// Invalid max concurrent synthesis value
+    #[error("Invalid max_concurrent_synthesis: {value} ({reason})")]
+    InvalidMaxConcurrentSynthesis {
+        /// The invalid value
+        value: usize,
+        /// Why it's invalid
+        reason: String,
+    },
 }
 
 /// Configuration loading errors
@@ -480,6 +522,7 @@ mod tests {
                 openai: None,
                 kokoro: Some(KokoroConfig::default()),
                 avspeech: None,
+                max_concurrent_synthesis: DEFAULT_MAX_CONCURRENT_SYNTHESIS,
             },
             buffer: BufferConfigToml::default(),
         }
@@ -771,5 +814,59 @@ mod tests {
     fn test_error_display_empty_api_key() {
         let err = ConfigValidationError::EmptyApiKey;
         assert_eq!(err.to_string(), "OpenAI API key is empty or not set");
+    }
+
+    // ========== Max Concurrent Synthesis Validation Tests ==========
+
+    #[test]
+    fn test_invalid_max_concurrent_synthesis_zero() {
+        let mut config = valid_config();
+        config.providers.max_concurrent_synthesis = 0;
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigValidationError::InvalidMaxConcurrentSynthesis { value: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn test_invalid_max_concurrent_synthesis_exceeds_limit() {
+        let mut config = valid_config();
+        config.providers.max_concurrent_synthesis = MAX_CONCURRENT_SYNTHESIS_LIMIT + 1;
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigValidationError::InvalidMaxConcurrentSynthesis { value, .. }) if value == MAX_CONCURRENT_SYNTHESIS_LIMIT + 1
+        ));
+    }
+
+    #[test]
+    fn test_valid_max_concurrent_synthesis_at_limit() {
+        let mut config = valid_config();
+        config.providers.max_concurrent_synthesis = MAX_CONCURRENT_SYNTHESIS_LIMIT;
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_valid_max_concurrent_synthesis_one() {
+        let mut config = valid_config();
+        config.providers.max_concurrent_synthesis = 1;
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_error_display_invalid_max_concurrent_synthesis() {
+        let err = ConfigValidationError::InvalidMaxConcurrentSynthesis {
+            value: 100,
+            reason: "must be <= 64".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Invalid max_concurrent_synthesis: 100 (must be <= 64)"
+        );
     }
 }

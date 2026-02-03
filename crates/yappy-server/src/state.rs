@@ -3,11 +3,14 @@
 //! This module provides the shared state for the Yappy TTS server:
 //! - [`ProviderRegistry`] - Thread-safe registry of TTS providers
 //! - [`AppState`] - Application state shared across Axum handlers
+//! - [`SynthesisPermit`] - RAII guard for per-provider synthesis concurrency limiting
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tracing::{debug, trace};
 use yappy_core::provider::ProviderId;
 use yappy_core::{Config, ProviderMetadata, ProviderStatus, TtsProvider};
 
@@ -45,7 +48,6 @@ use yappy_core::{Config, ProviderMetadata, ProviderStatus, TtsProvider};
 ///     println!("{}: {:?}", id, status);
 /// }
 /// ```
-#[derive(Default)]
 pub struct ProviderRegistry {
     /// Map of provider ID to provider implementation (only successfully initialized providers)
     providers: HashMap<ProviderId, Arc<dyn TtsProvider + Send + Sync>>,
@@ -56,22 +58,53 @@ pub struct ProviderRegistry {
     /// This includes providers that failed to initialize, allowing the server
     /// to report on why certain providers are not available.
     provider_statuses: HashMap<ProviderId, ProviderStatus>,
+    /// Per-provider semaphores for limiting concurrent synthesis operations (FR-019)
+    ///
+    /// Each provider has its own semaphore to prevent resource exhaustion.
+    /// The semaphore capacity is configured via `max_concurrent_synthesis`.
+    synthesis_semaphores: HashMap<ProviderId, Arc<Semaphore>>,
+    /// Configured maximum concurrent synthesis operations per provider
+    max_concurrent_synthesis: usize,
 }
 
-impl ProviderRegistry {
-    /// Create an empty provider registry
-    pub fn new() -> Self {
+impl Default for ProviderRegistry {
+    fn default() -> Self {
         Self {
             providers: HashMap::new(),
             default_provider: None,
             provider_statuses: HashMap::new(),
+            synthesis_semaphores: HashMap::new(),
+            max_concurrent_synthesis: 4, // Default value
+        }
+    }
+}
+
+impl ProviderRegistry {
+    /// Create an empty provider registry with default concurrency limit
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a provider registry with a custom concurrency limit
+    ///
+    /// # Arguments
+    ///
+    /// * `max_concurrent_synthesis` - Maximum concurrent synthesis operations per provider
+    pub fn with_max_concurrent_synthesis(max_concurrent_synthesis: usize) -> Self {
+        Self {
+            providers: HashMap::new(),
+            default_provider: None,
+            provider_statuses: HashMap::new(),
+            synthesis_semaphores: HashMap::new(),
+            max_concurrent_synthesis,
         }
     }
 
     /// Register a TTS provider
     ///
     /// The provider's ID is extracted from its metadata. If a provider
-    /// with the same ID already exists, it will be replaced.
+    /// with the same ID already exists, it will be replaced. A semaphore
+    /// is created for the provider to limit concurrent synthesis operations.
     ///
     /// # Arguments
     ///
@@ -79,6 +112,11 @@ impl ProviderRegistry {
     pub fn register(&mut self, provider: impl TtsProvider + 'static) {
         let metadata = provider.metadata();
         let id = metadata.id;
+
+        // Create semaphore for this provider
+        let semaphore = Arc::new(Semaphore::new(self.max_concurrent_synthesis));
+        self.synthesis_semaphores.insert(id.clone(), semaphore);
+
         self.providers.insert(id, Arc::new(provider));
     }
 
@@ -206,6 +244,153 @@ impl ProviderRegistry {
     pub const fn all_statuses(&self) -> &HashMap<ProviderId, ProviderStatus> {
         &self.provider_statuses
     }
+
+    /// Get the configured max concurrent synthesis limit
+    pub const fn max_concurrent_synthesis(&self) -> usize {
+        self.max_concurrent_synthesis
+    }
+
+    /// Acquire a synthesis permit for a provider (FR-019)
+    ///
+    /// This method implements per-provider concurrency limiting by acquiring
+    /// a permit from the provider's semaphore. If no permits are available,
+    /// the call will wait (async) until one becomes free.
+    ///
+    /// The returned `SynthesisPermit` is an RAII guard that automatically
+    /// releases the permit when dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider_id` - The ID of the provider to acquire a permit for
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(SynthesisPermit)` if the provider exists and a permit
+    /// was successfully acquired, `None` if the provider is not registered.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let permit = registry.acquire_synthesis_permit(&provider_id).await;
+    /// if let Some(_permit) = permit {
+    ///     // Perform synthesis - permit is held
+    ///     let result = provider.synthesize(...).await;
+    ///     // permit is automatically released when dropped
+    /// }
+    /// ```
+    pub async fn acquire_synthesis_permit(
+        &self,
+        provider_id: &ProviderId,
+    ) -> Option<SynthesisPermit> {
+        let semaphore = self.synthesis_semaphores.get(provider_id)?.clone();
+
+        // Log when we're about to wait for a permit
+        let available = semaphore.available_permits();
+        if available == 0 {
+            debug!(
+                provider = %provider_id.0,
+                max_concurrent = self.max_concurrent_synthesis,
+                "Synthesis queued - waiting for permit (all slots in use)"
+            );
+        } else {
+            trace!(
+                provider = %provider_id.0,
+                available_permits = available,
+                "Acquiring synthesis permit"
+            );
+        }
+
+        let start = Instant::now();
+
+        // Acquire permit (this will wait if none available)
+        let permit = semaphore.clone().acquire_owned().await.ok()?;
+
+        let wait_time = start.elapsed();
+        if wait_time.as_millis() > 0 {
+            debug!(
+                provider = %provider_id.0,
+                wait_ms = wait_time.as_millis(),
+                "Synthesis permit acquired after waiting"
+            );
+        } else {
+            trace!(
+                provider = %provider_id.0,
+                "Synthesis permit acquired immediately"
+            );
+        }
+
+        Some(SynthesisPermit {
+            _permit: permit,
+            provider_id: provider_id.clone(),
+        })
+    }
+
+    /// Try to acquire a synthesis permit without waiting
+    ///
+    /// This is a non-blocking version of `acquire_synthesis_permit` that
+    /// returns immediately if no permit is available.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider_id` - The ID of the provider to acquire a permit for
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(SynthesisPermit)` if a permit was immediately available,
+    /// `None` if the provider doesn't exist or no permits are available.
+    pub fn try_acquire_synthesis_permit(
+        &self,
+        provider_id: &ProviderId,
+    ) -> Option<SynthesisPermit> {
+        let semaphore = self.synthesis_semaphores.get(provider_id)?.clone();
+
+        let permit = semaphore.try_acquire_owned().ok()?;
+
+        trace!(
+            provider = %provider_id.0,
+            "Synthesis permit acquired (try)"
+        );
+
+        Some(SynthesisPermit {
+            _permit: permit,
+            provider_id: provider_id.clone(),
+        })
+    }
+}
+
+/// RAII guard for a synthesis permit (FR-019)
+///
+/// This guard is returned by `ProviderRegistry::acquire_synthesis_permit` and
+/// automatically releases the synthesis slot when dropped. This ensures that
+/// concurrent synthesis operations are properly limited even if the synthesis
+/// task panics or is cancelled.
+///
+/// # Example
+///
+/// ```ignore
+/// // Permit is acquired
+/// let permit = registry.acquire_synthesis_permit(&provider_id).await?;
+///
+/// // Do synthesis work...
+/// let result = provider.synthesize(...).await;
+///
+/// // Permit is automatically released when `permit` goes out of scope
+/// ```
+#[derive(Debug)]
+pub struct SynthesisPermit {
+    /// The underlying semaphore permit (released on drop)
+    _permit: OwnedSemaphorePermit,
+    /// The provider ID this permit is for (for logging)
+    provider_id: ProviderId,
+}
+
+impl Drop for SynthesisPermit {
+    fn drop(&mut self) {
+        trace!(
+            provider = %self.provider_id.0,
+            "Synthesis permit released"
+        );
+    }
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -214,6 +399,11 @@ impl std::fmt::Debug for ProviderRegistry {
             .field("providers", &self.providers.keys().collect::<Vec<_>>())
             .field("default_provider", &self.default_provider)
             .field("provider_statuses", &self.provider_statuses)
+            .field("max_concurrent_synthesis", &self.max_concurrent_synthesis)
+            .field(
+                "synthesis_semaphores",
+                &self.synthesis_semaphores.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -253,9 +443,13 @@ impl std::fmt::Debug for ProviderRegistry {
 pub async fn register_providers(config: &yappy_core::Config) -> ProviderRegistry {
     use tracing::{debug, info, warn};
 
-    let mut registry = ProviderRegistry::new();
+    let max_concurrent = config.providers.max_concurrent_synthesis;
+    let mut registry = ProviderRegistry::with_max_concurrent_synthesis(max_concurrent);
 
-    info!("Registering TTS providers based on feature flags");
+    info!(
+        max_concurrent_synthesis = max_concurrent,
+        "Registering TTS providers based on feature flags"
+    );
 
     // Register Kokoro provider if feature is enabled
     #[cfg(feature = "kokoro")]
@@ -878,8 +1072,177 @@ mod tests {
                 openai: None,
                 kokoro: None,
                 avspeech: None,
+                max_concurrent_synthesis: 4,
             },
             buffer: yappy_core::config::BufferConfigToml::default(),
         }
+    }
+
+    // ========== Synthesis Permit Tests (FR-019) ==========
+
+    #[test]
+    fn test_registry_creates_semaphore_on_register() {
+        let mut registry = ProviderRegistry::with_max_concurrent_synthesis(8);
+        let provider = MockProvider::new("test", "Test Provider");
+
+        registry.register(provider);
+
+        // Verify semaphore was created
+        assert!(registry
+            .synthesis_semaphores
+            .contains_key(&ProviderId::new("test")));
+    }
+
+    #[test]
+    fn test_registry_max_concurrent_synthesis() {
+        let registry = ProviderRegistry::with_max_concurrent_synthesis(16);
+        assert_eq!(registry.max_concurrent_synthesis(), 16);
+
+        let default_registry = ProviderRegistry::new();
+        assert_eq!(default_registry.max_concurrent_synthesis(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_acquire_synthesis_permit_success() {
+        let mut registry = ProviderRegistry::with_max_concurrent_synthesis(2);
+        registry.register(MockProvider::new("test", "Test Provider"));
+
+        let provider_id = ProviderId::new("test");
+
+        // Should successfully acquire first permit
+        let permit1 = registry.acquire_synthesis_permit(&provider_id).await;
+        assert!(permit1.is_some());
+
+        // Should successfully acquire second permit
+        let permit2 = registry.acquire_synthesis_permit(&provider_id).await;
+        assert!(permit2.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_acquire_synthesis_permit_nonexistent_provider() {
+        let registry = ProviderRegistry::new();
+        let provider_id = ProviderId::new("nonexistent");
+
+        let permit = registry.acquire_synthesis_permit(&provider_id).await;
+        assert!(permit.is_none());
+    }
+
+    #[test]
+    fn test_try_acquire_synthesis_permit() {
+        let mut registry = ProviderRegistry::with_max_concurrent_synthesis(1);
+        registry.register(MockProvider::new("test", "Test Provider"));
+
+        let provider_id = ProviderId::new("test");
+
+        // Should successfully acquire first permit
+        let permit1 = registry.try_acquire_synthesis_permit(&provider_id);
+        assert!(permit1.is_some());
+
+        // Should fail to acquire second permit (no blocking)
+        let permit2 = registry.try_acquire_synthesis_permit(&provider_id);
+        assert!(permit2.is_none());
+
+        // After dropping first permit, should succeed again
+        drop(permit1);
+        let permit3 = registry.try_acquire_synthesis_permit(&provider_id);
+        assert!(permit3.is_some());
+    }
+
+    #[test]
+    fn test_try_acquire_synthesis_permit_nonexistent_provider() {
+        let registry = ProviderRegistry::new();
+        let provider_id = ProviderId::new("nonexistent");
+
+        let permit = registry.try_acquire_synthesis_permit(&provider_id);
+        assert!(permit.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_synthesis_permit_release_on_drop() {
+        let mut registry = ProviderRegistry::with_max_concurrent_synthesis(1);
+        registry.register(MockProvider::new("test", "Test Provider"));
+
+        let provider_id = ProviderId::new("test");
+        let semaphore = registry
+            .synthesis_semaphores
+            .get(&provider_id)
+            .unwrap()
+            .clone();
+
+        // Initial state: 1 permit available
+        assert_eq!(semaphore.available_permits(), 1);
+
+        {
+            let _permit = registry
+                .acquire_synthesis_permit(&provider_id)
+                .await
+                .unwrap();
+            // While permit is held: 0 permits available
+            assert_eq!(semaphore.available_permits(), 0);
+        }
+
+        // After permit is dropped: 1 permit available again
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_synthesis_permit_concurrent_limiting() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let registry = Arc::new({
+            let mut r = ProviderRegistry::with_max_concurrent_synthesis(2);
+            r.register(MockProvider::new("test", "Test Provider"));
+            r
+        });
+
+        let provider_id = ProviderId::new("test");
+        let active_count = Arc::new(AtomicUsize::new(0));
+        let max_concurrent = Arc::new(AtomicUsize::new(0));
+
+        // Spawn 5 tasks that each try to acquire a permit
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let registry = registry.clone();
+            let provider_id = provider_id.clone();
+            let active_count = active_count.clone();
+            let max_concurrent = max_concurrent.clone();
+
+            handles.push(tokio::spawn(async move {
+                let _permit = registry
+                    .acquire_synthesis_permit(&provider_id)
+                    .await
+                    .unwrap();
+
+                // Increment active count
+                let current = active_count.fetch_add(1, Ordering::SeqCst) + 1;
+
+                // Track max concurrent
+                max_concurrent.fetch_max(current, Ordering::SeqCst);
+
+                // Simulate some work
+                tokio::time::sleep(Duration::from_millis(10)).await;
+
+                // Decrement active count
+                active_count.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+
+        // Wait for all tasks with a timeout
+        let result = timeout(Duration::from_secs(5), async {
+            for handle in handles {
+                handle.await.unwrap();
+            }
+        })
+        .await;
+
+        assert!(result.is_ok(), "Tasks should complete within timeout");
+
+        // Max concurrent should never exceed 2
+        assert!(
+            max_concurrent.load(Ordering::SeqCst) <= 2,
+            "Max concurrent syntheses should not exceed limit"
+        );
     }
 }

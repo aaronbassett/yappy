@@ -196,6 +196,7 @@ async fn start_test_server(
             openai: None,
             kokoro: None,
             avspeech: None,
+            max_concurrent_synthesis: 4,
         },
         buffer: BufferConfigToml::default(),
     };
@@ -1371,6 +1372,7 @@ async fn start_test_server_with_buffer_config(
             openai: None,
             kokoro: None,
             avspeech: None,
+            max_concurrent_synthesis: 4,
         },
         buffer: buffer_config,
     };

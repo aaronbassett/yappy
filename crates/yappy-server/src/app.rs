@@ -247,6 +247,7 @@ mod tests {
                 openai: None,
                 kokoro: None,
                 avspeech: None,
+                max_concurrent_synthesis: 4,
             },
             buffer: yappy_core::config::BufferConfigToml::default(),
         }

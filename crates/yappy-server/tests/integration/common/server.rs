@@ -182,6 +182,7 @@ impl TestServerBuilder {
                 openai: None,
                 kokoro: None,
                 avspeech: None,
+                max_concurrent_synthesis: 4,
             },
             buffer: BufferConfigToml {
                 flush_timeout_ms: 5000, // 5 seconds - long enough to prevent auto-flush in tests
