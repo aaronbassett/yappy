@@ -130,8 +130,8 @@
 
 ### WebSocket Handler Implementation
 - [x] T060 [US1] Implement WebSocket upgrade handler in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T061 [GIT] Commit: add WebSocket upgrade handler
-- [ ] T062 [US1] Implement session.init message handling in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T061 [GIT] Commit: add WebSocket upgrade handler
+- [x] T062 [US1] Implement session.init message handling in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T063 [GIT] Commit: add session.init handling
 - [ ] T064 [US1] Implement text message handling with sentence buffer integration in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T065 [GIT] Commit: add text message handling

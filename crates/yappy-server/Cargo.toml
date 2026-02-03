@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 description = "Yappy streaming TTS server"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "yappy-server"
 path = "src/main.rs"
