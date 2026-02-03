@@ -3,6 +3,10 @@
 //! A standalone server that accepts streaming text input via WebSocket
 //! and produces near-realtime audio output through pluggable TTS providers.
 
+mod state;
+
+pub use state::{AppState, ProviderRegistry};
+
 use clap::Parser;
 use std::path::PathBuf;
 use tracing::info;

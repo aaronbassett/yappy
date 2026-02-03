@@ -85,10 +85,10 @@
 ### WebSocket Message Types (yappy-core)
 - [x] T035 [P] Implement ClientMessage enum (session.init, text, text.done) in crates/yappy-core/src/message.rs (use devs:rust-dev agent)
 - [x] T036 [P] Implement ServerMessage enum (session.ready, audio.done, error, session.error) in crates/yappy-core/src/message.rs (use devs:rust-dev agent)
-- [ ] T037 [GIT] Commit: add WebSocket message types
+- [x] T037 [GIT] Commit: add WebSocket message types
 
 ### Server Infrastructure (yappy-server)
-- [ ] T038 Implement AppState with provider registry in crates/yappy-server/src/state.rs (use devs:rust-dev agent)
+- [x] T038 Implement AppState with provider registry in crates/yappy-server/src/state.rs (use devs:rust-dev agent)
 - [ ] T039 [GIT] Commit: add AppState
 - [ ] T040 Implement Axum router setup in crates/yappy-server/src/app.rs (use devs:rust-dev agent)
 - [ ] T041 [GIT] Commit: add Axum router

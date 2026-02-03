@@ -34,6 +34,9 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 tokio-util = { workspace = true }
 
+[dev-dependencies]
+async-trait = { workspace = true }
+
 [features]
 default = ["kokoro"]
 kokoro = []
