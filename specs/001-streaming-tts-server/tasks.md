@@ -140,8 +140,8 @@
 
 ### Audio Streaming
 - [x] T068 [US1] Implement binary audio frame serialization (12-byte header + data) in crates/yappy-core/src/audio.rs (pre-existing, added tests)
-- [ ] T069 [GIT] Commit: add binary audio frame serialization
-- [ ] T070 [US1] Implement audio chunk streaming from provider to WebSocket in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T069 [GIT] Commit: add binary audio frame serialization
+- [x] T070 [US1] Implement audio chunk streaming from provider to WebSocket in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T071 [GIT] Commit: add audio streaming
 - [ ] T072 [US1] Implement audio.done message with statistics in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T073 [GIT] Commit: add audio.done message
