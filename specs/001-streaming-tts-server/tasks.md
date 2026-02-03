@@ -183,10 +183,10 @@
 **Independent Test**: Call /providers endpoint, verify response lists all compiled providers, then create session with specific provider
 
 ### Phase Start
-- [ ] T092 [GIT] Verify working tree is clean before starting Phase 4
-- [ ] T093 [GIT] Pull and rebase on origin/main if needed
-- [ ] T094 [US2] Create specs/001-streaming-tts-server/retro/P4.md for this phase
-- [ ] T095 [GIT] Commit: initialize phase 4 retro
+- [x] T092 [GIT] Verify working tree is clean before starting Phase 4
+- [x] T093 [GIT] Pull and rebase on origin/main if needed (already up to date)
+- [x] T094 [US2] Create specs/001-streaming-tts-server/retro/P4.md for this phase
+- [x] T095 [GIT] Commit: initialize phase 4 retro
 
 ### Provider Registry
 - [ ] T096 [US2] Implement ProviderRegistry with feature-flag based provider registration in crates/yappy-server/src/state.rs (use devs:rust-dev agent)
