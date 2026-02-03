@@ -189,8 +189,8 @@
 - [x] T095 [GIT] Commit: initialize phase 4 retro
 
 ### Provider Registry
-- [ ] T096 [US2] Implement ProviderRegistry with feature-flag based provider registration in crates/yappy-server/src/state.rs (use devs:rust-dev agent)
-- [ ] T097 [GIT] Commit: add ProviderRegistry
+- [x] T096 [US2] Implement ProviderRegistry with feature-flag based provider registration in crates/yappy-server/src/state.rs (use devs:rust-dev agent)
+- [x] T097 [GIT] Commit: add ProviderRegistry
 - [ ] T098 [US2] Implement provider status tracking (available/not_configured/unavailable) in crates/yappy-server/src/state.rs (use devs:rust-dev agent)
 - [ ] T099 [GIT] Commit: add provider status tracking
 

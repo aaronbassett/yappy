@@ -14,14 +14,24 @@ use yappy_core::{Config, ProviderMetadata, ProviderStatus, TtsProvider};
 /// Registry holding all available TTS providers
 ///
 /// The registry maps provider IDs to their implementations and tracks
-/// which provider is the default. It is designed to be wrapped in an
-/// `Arc` for thread-safe sharing across Axum handlers.
+/// which provider is the default. It also tracks the initialization status
+/// of all compiled-in providers, including those that failed to initialize.
+///
+/// The `provider_statuses` field tracks the initialization state of all
+/// known providers, while `providers` only contains successfully initialized
+/// providers. This allows endpoints like `/health` and `/providers` to report
+/// on all compiled-in providers.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let mut registry = ProviderRegistry::new();
 /// registry.register(kokoro_provider);
+/// registry.record_status(ProviderId::new("kokoro"), ProviderStatus::Available);
+/// registry.record_status(
+///     ProviderId::new("openai"),
+///     ProviderStatus::NotConfigured { reason: "API key not set".to_string() }
+/// );
 /// registry.set_default(ProviderId::new("kokoro"));
 ///
 /// // Get a provider
@@ -29,13 +39,23 @@ use yappy_core::{Config, ProviderMetadata, ProviderStatus, TtsProvider};
 ///     let metadata = provider.metadata();
 ///     println!("Using provider: {}", metadata.name);
 /// }
+///
+/// // Check status of all providers (including those not initialized)
+/// for (id, status) in registry.all_statuses() {
+///     println!("{}: {:?}", id, status);
+/// }
 /// ```
 #[derive(Default)]
 pub struct ProviderRegistry {
-    /// Map of provider ID to provider implementation
+    /// Map of provider ID to provider implementation (only successfully initialized providers)
     providers: HashMap<ProviderId, Arc<dyn TtsProvider + Send + Sync>>,
     /// The default provider ID
     default_provider: Option<ProviderId>,
+    /// Initialization status of all compiled-in providers
+    ///
+    /// This includes providers that failed to initialize, allowing the server
+    /// to report on why certain providers are not available.
+    provider_statuses: HashMap<ProviderId, ProviderStatus>,
 }
 
 impl ProviderRegistry {
@@ -44,6 +64,7 @@ impl ProviderRegistry {
         Self {
             providers: HashMap::new(),
             default_provider: None,
+            provider_statuses: HashMap::new(),
         }
     }
 
@@ -140,6 +161,51 @@ impl ProviderRegistry {
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
     }
+
+    /// Record the initialization status of a provider
+    ///
+    /// This records whether a compiled-in provider initialized successfully,
+    /// failed due to missing configuration, or is unavailable for other reasons.
+    /// This status is separate from the dynamic health check status.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The provider ID
+    /// * `status` - The initialization status to record
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// registry.record_status(
+    ///     ProviderId::new("openai"),
+    ///     ProviderStatus::NotConfigured { reason: "API key not set".to_string() }
+    /// );
+    /// ```
+    pub fn record_status(&mut self, id: ProviderId, status: ProviderStatus) {
+        self.provider_statuses.insert(id, status);
+    }
+
+    /// Get the initialization status of a provider
+    ///
+    /// Returns `None` if the provider ID is not known to the registry.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The provider ID to look up
+    pub fn get_status(&self, id: &ProviderId) -> Option<ProviderStatus> {
+        self.provider_statuses.get(id).cloned()
+    }
+
+    /// Get all provider initialization statuses
+    ///
+    /// Returns a reference to the map of all compiled-in providers and their
+    /// initialization statuses. This includes providers that:
+    /// - Initialized successfully (`Available`)
+    /// - Failed due to missing configuration (`NotConfigured`)
+    /// - Are unavailable for other reasons (`Unavailable`)
+    pub const fn all_statuses(&self) -> &HashMap<ProviderId, ProviderStatus> {
+        &self.provider_statuses
+    }
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -147,6 +213,7 @@ impl std::fmt::Debug for ProviderRegistry {
         f.debug_struct("ProviderRegistry")
             .field("providers", &self.providers.keys().collect::<Vec<_>>())
             .field("default_provider", &self.default_provider)
+            .field("provider_statuses", &self.provider_statuses)
             .finish()
     }
 }
@@ -193,14 +260,22 @@ pub async fn register_providers(config: &yappy_core::Config) -> ProviderRegistry
     // Register Kokoro provider if feature is enabled
     #[cfg(feature = "kokoro")]
     {
+        let kokoro_id = ProviderId::new("kokoro");
         debug!("Kokoro feature enabled, attempting to register provider");
         match register_kokoro_provider(config).await {
             Ok(provider) => {
                 info!("Kokoro provider registered successfully");
                 registry.register(provider);
+                registry.record_status(kokoro_id, ProviderStatus::Available);
             }
             Err(e) => {
                 warn!(error = %e, "Failed to initialize Kokoro provider, skipping");
+                registry.record_status(
+                    kokoro_id,
+                    ProviderStatus::Unavailable {
+                        reason: e.to_string(),
+                    },
+                );
             }
         }
     }
@@ -214,15 +289,27 @@ pub async fn register_providers(config: &yappy_core::Config) -> ProviderRegistry
     // TODO: Implement when yappy-provider-openai crate exists
     #[cfg(feature = "openai-tts")]
     {
+        let openai_id = ProviderId::new("openai");
         debug!("OpenAI TTS feature enabled, but provider not yet implemented");
+        registry.record_status(
+            openai_id,
+            ProviderStatus::NotConfigured {
+                reason: "Provider not yet implemented".to_string(),
+            },
+        );
         // When implemented:
         // match register_openai_provider(config).await {
         //     Ok(provider) => {
         //         info!("OpenAI provider registered successfully");
         //         registry.register(provider);
+        //         registry.record_status(openai_id, ProviderStatus::Available);
         //     }
         //     Err(e) => {
         //         warn!(error = %e, "Failed to initialize OpenAI provider, skipping");
+        //         registry.record_status(
+        //             openai_id,
+        //             ProviderStatus::NotConfigured { reason: e.to_string() },
+        //         );
         //     }
         // }
     }
@@ -231,15 +318,43 @@ pub async fn register_providers(config: &yappy_core::Config) -> ProviderRegistry
     // TODO: Implement when yappy-provider-avspeech crate exists
     #[cfg(feature = "avspeech")]
     {
+        let avspeech_id = ProviderId::new("avspeech");
         debug!("AVSpeech feature enabled, but provider not yet implemented");
+
+        // AVSpeech is macOS only - check platform
+        #[cfg(target_os = "macos")]
+        {
+            registry.record_status(
+                avspeech_id,
+                ProviderStatus::NotConfigured {
+                    reason: "Provider not yet implemented".to_string(),
+                },
+            );
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            registry.record_status(
+                avspeech_id,
+                ProviderStatus::Unavailable {
+                    reason: "AVSpeech is only available on macOS".to_string(),
+                },
+            );
+        }
+
         // When implemented:
         // match register_avspeech_provider(config).await {
         //     Ok(provider) => {
         //         info!("AVSpeech provider registered successfully");
         //         registry.register(provider);
+        //         registry.record_status(avspeech_id, ProviderStatus::Available);
         //     }
         //     Err(e) => {
         //         warn!(error = %e, "Failed to initialize AVSpeech provider, skipping");
+        //         registry.record_status(
+        //             avspeech_id,
+        //             ProviderStatus::Unavailable { reason: e.to_string() },
+        //         );
         //     }
         // }
     }
@@ -475,6 +590,7 @@ mod tests {
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
         assert!(registry.default_provider().is_none());
+        assert!(registry.all_statuses().is_empty());
     }
 
     #[test]
@@ -549,6 +665,164 @@ mod tests {
         assert!(ids.contains(&"available1"));
         assert!(ids.contains(&"available2"));
         assert!(!ids.contains(&"unavailable"));
+    }
+
+    #[test]
+    fn test_registry_record_status() {
+        let mut registry = ProviderRegistry::new();
+
+        // Record an Available status
+        registry.record_status(ProviderId::new("kokoro"), ProviderStatus::Available);
+
+        // Record a NotConfigured status
+        registry.record_status(
+            ProviderId::new("openai"),
+            ProviderStatus::NotConfigured {
+                reason: "API key not set".to_string(),
+            },
+        );
+
+        // Record an Unavailable status
+        registry.record_status(
+            ProviderId::new("avspeech"),
+            ProviderStatus::Unavailable {
+                reason: "macOS only".to_string(),
+            },
+        );
+
+        // Verify all statuses are recorded
+        assert_eq!(registry.all_statuses().len(), 3);
+    }
+
+    #[test]
+    fn test_registry_get_status() {
+        let mut registry = ProviderRegistry::new();
+
+        // Record statuses
+        registry.record_status(ProviderId::new("kokoro"), ProviderStatus::Available);
+        registry.record_status(
+            ProviderId::new("openai"),
+            ProviderStatus::NotConfigured {
+                reason: "API key not set".to_string(),
+            },
+        );
+
+        // Get existing status
+        let kokoro_status = registry.get_status(&ProviderId::new("kokoro"));
+        assert!(kokoro_status.is_some());
+        assert!(kokoro_status.unwrap().is_available());
+
+        // Get another existing status
+        let openai_status = registry.get_status(&ProviderId::new("openai"));
+        assert!(openai_status.is_some());
+        match openai_status.unwrap() {
+            ProviderStatus::NotConfigured { reason } => {
+                assert_eq!(reason, "API key not set");
+            }
+            _ => panic!("Expected NotConfigured status"),
+        }
+
+        // Get non-existent status
+        let missing = registry.get_status(&ProviderId::new("nonexistent"));
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_registry_all_statuses() {
+        let mut registry = ProviderRegistry::new();
+
+        // Initially empty
+        assert!(registry.all_statuses().is_empty());
+
+        // Add statuses
+        registry.record_status(ProviderId::new("kokoro"), ProviderStatus::Available);
+        registry.record_status(
+            ProviderId::new("openai"),
+            ProviderStatus::NotConfigured {
+                reason: "API key not set".to_string(),
+            },
+        );
+        registry.record_status(
+            ProviderId::new("avspeech"),
+            ProviderStatus::Unavailable {
+                reason: "macOS only".to_string(),
+            },
+        );
+
+        // Verify all_statuses returns the correct map
+        let statuses = registry.all_statuses();
+        assert_eq!(statuses.len(), 3);
+        assert!(statuses.contains_key(&ProviderId::new("kokoro")));
+        assert!(statuses.contains_key(&ProviderId::new("openai")));
+        assert!(statuses.contains_key(&ProviderId::new("avspeech")));
+
+        // Verify individual status types
+        assert!(statuses
+            .get(&ProviderId::new("kokoro"))
+            .unwrap()
+            .is_available());
+        assert!(!statuses
+            .get(&ProviderId::new("openai"))
+            .unwrap()
+            .is_available());
+        assert!(!statuses
+            .get(&ProviderId::new("avspeech"))
+            .unwrap()
+            .is_available());
+    }
+
+    #[test]
+    fn test_registry_status_overwrite() {
+        let mut registry = ProviderRegistry::new();
+
+        // Record initial status
+        registry.record_status(
+            ProviderId::new("kokoro"),
+            ProviderStatus::NotConfigured {
+                reason: "Model not found".to_string(),
+            },
+        );
+
+        // Verify initial status
+        let status = registry.get_status(&ProviderId::new("kokoro")).unwrap();
+        assert!(!status.is_available());
+
+        // Overwrite with new status
+        registry.record_status(ProviderId::new("kokoro"), ProviderStatus::Available);
+
+        // Verify status was updated
+        let status = registry.get_status(&ProviderId::new("kokoro")).unwrap();
+        assert!(status.is_available());
+
+        // Only one entry should exist
+        assert_eq!(registry.all_statuses().len(), 1);
+    }
+
+    #[test]
+    fn test_registry_statuses_independent_of_providers() {
+        let mut registry = ProviderRegistry::new();
+
+        // Register an actual provider
+        registry.register(MockProvider::new("kokoro", "Kokoro"));
+        registry.record_status(ProviderId::new("kokoro"), ProviderStatus::Available);
+
+        // Record status for provider that's NOT registered
+        registry.record_status(
+            ProviderId::new("openai"),
+            ProviderStatus::NotConfigured {
+                reason: "API key not set".to_string(),
+            },
+        );
+
+        // providers map has 1 entry
+        assert_eq!(registry.len(), 1);
+        assert!(registry.contains(&ProviderId::new("kokoro")));
+        assert!(!registry.contains(&ProviderId::new("openai")));
+
+        // provider_statuses has 2 entries
+        assert_eq!(registry.all_statuses().len(), 2);
+        assert!(registry.get_status(&ProviderId::new("kokoro")).is_some());
+        assert!(registry.get_status(&ProviderId::new("openai")).is_some());
     }
 
     #[test]
