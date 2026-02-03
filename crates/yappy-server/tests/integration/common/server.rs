@@ -106,6 +106,19 @@ impl TestServerBuilder {
         self
     }
 
+    /// Add a mock provider with a specific voice
+    pub fn with_mock_provider_and_voice(mut self, id: &str, voice_id: &str) -> Self {
+        let provider = MockTtsProvider::with_voice(id, voice_id);
+        let provider_id = ProviderId::new(id);
+        self.registry.register(provider);
+        self.registry
+            .record_status(provider_id, ProviderStatus::Available);
+        if self.default_provider.is_none() {
+            self.default_provider = Some(id.to_string());
+        }
+        self
+    }
+
     /// Set the default provider
     pub fn with_default_provider(mut self, id: &str) -> Self {
         self.default_provider = Some(id.to_string());

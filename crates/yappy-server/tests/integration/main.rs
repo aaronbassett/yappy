@@ -6,3 +6,4 @@
 mod common;
 mod ws_basic;
 mod ws_providers;
+mod ws_voices;

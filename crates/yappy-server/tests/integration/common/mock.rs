@@ -127,6 +127,25 @@ impl MockTtsProvider {
         }
     }
 
+    /// Create a mock provider with a single custom voice
+    pub fn with_voice(id: &str, voice_id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            name: format!("Mock {id}"),
+            status: ProviderStatus::Available,
+            voices: vec![VoiceInfo {
+                id: voice_id.to_string(),
+                name: format!("Voice {voice_id}"),
+                language: "en-US".to_string(),
+                gender: None,
+                sample_url: None,
+            }],
+            synthesis_mode: MockSynthesisMode::default(),
+            synthesize_count: AtomicUsize::new(0),
+            available: AtomicBool::new(true),
+        }
+    }
+
     /// Get the number of times synthesize was called
     pub fn synthesize_count(&self) -> usize {
         self.synthesize_count.load(Ordering::SeqCst)
