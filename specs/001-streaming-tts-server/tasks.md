@@ -315,9 +315,9 @@
 **Independent Test**: Create sessions requesting different formats, verify audio chunks are encoded correctly
 
 ### Phase Start
-- [ ] T160 [GIT] Verify working tree is clean before starting Phase 7
-- [ ] T161 [GIT] Pull and rebase on origin/main if needed
-- [ ] T162 [US5] Create specs/001-streaming-tts-server/retro/P7.md for this phase
+- [x] T160 [GIT] Verify working tree is clean before starting Phase 7
+- [x] T161 [GIT] Pull and rebase on origin/main if needed
+- [x] T162 [US5] Create specs/001-streaming-tts-server/retro/P7.md for this phase
 - [ ] T163 [GIT] Commit: initialize phase 7 retro
 
 ### Audio Transcoding
