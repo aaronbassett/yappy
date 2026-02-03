@@ -216,7 +216,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         // Check if shutdown was requested - if so, initiate graceful close
         if session_guard.is_shutting_down() {
             info!("Server shutdown requested, initiating graceful session close");
-            if let Err(e) = handle_graceful_shutdown(&mut session, &mut bp_sender, state.providers()).await {
+            if let Err(e) =
+                handle_graceful_shutdown(&mut session, &mut bp_sender, state.providers()).await
+            {
                 warn!(error = %e, "Error during graceful shutdown");
             }
             break;

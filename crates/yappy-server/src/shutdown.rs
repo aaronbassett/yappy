@@ -142,10 +142,7 @@ impl ShutdownCoordinator {
         }
 
         let active = self.active_sessions.load(Ordering::Relaxed);
-        info!(
-            active_sessions = active,
-            "Initiating graceful shutdown"
-        );
+        info!(active_sessions = active, "Initiating graceful shutdown");
 
         self.shutdown_token.cancel();
     }
@@ -208,10 +205,7 @@ impl ShutdownCoordinator {
                 let elapsed = start.elapsed();
                 #[allow(clippy::cast_possible_truncation)]
                 let elapsed_ms = elapsed.as_millis() as u64;
-                info!(
-                    elapsed_ms,
-                    "All sessions drained gracefully"
-                );
+                info!(elapsed_ms, "All sessions drained gracefully");
                 true
             }
             Ok(false) => {
