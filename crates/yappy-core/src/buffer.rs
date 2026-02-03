@@ -1,5 +1,6 @@
 //! Sentence buffer implementation
 
+use crate::session::CodeBlockMode;
 use srx::SRX;
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -219,6 +220,9 @@ pub struct BufferConfig {
 
     /// Maximum buffer size before forced flush (default: 4KB)
     pub max_size: usize,
+
+    /// Code block handling mode (default: Skip)
+    pub code_block_mode: CodeBlockMode,
 }
 
 impl Default for BufferConfig {
@@ -226,7 +230,17 @@ impl Default for BufferConfig {
         Self {
             flush_timeout: Duration::from_millis(500),
             max_size: 4096,
+            code_block_mode: CodeBlockMode::default(),
         }
+    }
+}
+
+impl BufferConfig {
+    /// Create a new `BufferConfig` with the specified code block mode
+    #[must_use]
+    pub const fn with_code_block_mode(mut self, mode: CodeBlockMode) -> Self {
+        self.code_block_mode = mode;
+        self
     }
 }
 
@@ -256,8 +270,13 @@ pub struct SentenceBuffer {
     sentence_index: u32,
 
     /// Whether currently inside a code block
-    #[allow(dead_code)]
     in_code_block: bool,
+
+    /// Content accumulated while inside a code block (for potential literal output)
+    code_block_content: String,
+
+    /// Whether the opening fence had any preceding text that needs processing
+    pre_fence_text: String,
 
     /// Last time text was added
     last_push: Option<Instant>,
@@ -277,14 +296,21 @@ impl SentenceBuffer {
             config,
             sentence_index: 0,
             in_code_block: false,
+            code_block_content: String::new(),
+            pre_fence_text: String::new(),
             last_push: None,
         }
     }
 
     /// Add text chunk to buffer, return complete sentences
     pub fn push(&mut self, text: &str) -> Vec<Sentence> {
-        self.buffer.push_str(text);
         self.last_push = Some(Instant::now());
+
+        // Process text through code block handling
+        let processed_text = self.process_code_blocks(text);
+
+        // Add processed text to buffer
+        self.buffer.push_str(&processed_text);
 
         let mut sentences = Vec::new();
 
@@ -312,9 +338,146 @@ impl SentenceBuffer {
         sentences
     }
 
+    /// Process incoming text for code block handling
+    ///
+    /// Detects triple backtick fences and handles them according to the configured mode:
+    /// - `Skip`: Remove code block content entirely
+    /// - `ReadLiterally`: Pass code block content through as-is
+    /// - `AnnounceAndSkip`: Emit "code block" text instead of actual content
+    ///
+    /// Code blocks must be fully closed to be recognized. Nested code blocks are not
+    /// supported; the first closing fence ends the block.
+    fn process_code_blocks(&mut self, text: &str) -> String {
+        // For ReadLiterally mode, no processing needed
+        if self.config.code_block_mode == CodeBlockMode::ReadLiterally {
+            return text.to_string();
+        }
+
+        let mut result = String::new();
+        let mut remaining = text;
+
+        while !remaining.is_empty() {
+            if self.in_code_block {
+                // Look for closing fence
+                if let Some(close_pos) = remaining.find("```") {
+                    // Found closing fence - code block is complete
+                    let code_content = &remaining[..close_pos];
+                    self.code_block_content.push_str(code_content);
+
+                    // Handle the completed code block based on mode
+                    match self.config.code_block_mode {
+                        CodeBlockMode::Skip => {
+                            // Discard the code block content entirely
+                        }
+                        CodeBlockMode::AnnounceAndSkip => {
+                            // Emit "code block" as a sentence
+                            result.push_str("code block. ");
+                        }
+                        CodeBlockMode::ReadLiterally => {
+                            // This branch won't be reached due to early return above
+                            unreachable!()
+                        }
+                    }
+
+                    // Reset code block state
+                    self.in_code_block = false;
+                    self.code_block_content.clear();
+
+                    // Move past the closing fence
+                    remaining = &remaining[close_pos + 3..];
+                } else {
+                    // No closing fence found - accumulate content and wait for more input
+                    self.code_block_content.push_str(remaining);
+                    break;
+                }
+            } else {
+                // Not in a code block - look for opening fence
+                if let Some(open_pos) = remaining.find("```") {
+                    // Add text before the fence to result
+                    result.push_str(&remaining[..open_pos]);
+
+                    // Enter code block mode
+                    self.in_code_block = true;
+                    self.code_block_content.clear();
+
+                    // Move past the opening fence
+                    let after_fence = &remaining[open_pos + 3..];
+
+                    // Skip optional language specifier (until newline or more text)
+                    // The language specifier is on the same line as the opening fence
+                    if let Some(newline_pos) = after_fence.find('\n') {
+                        remaining = &after_fence[newline_pos + 1..];
+                    } else {
+                        // No newline yet - the language specifier may be incomplete
+                        // Store what we have and wait for more input
+                        remaining = "";
+                    }
+                } else {
+                    // No opening fence - pass text through
+                    // But check if we might have a partial fence at the end
+                    let partial_fence_check = Self::check_partial_fence(remaining);
+                    if let Some((safe_text, held_back)) = partial_fence_check {
+                        result.push_str(safe_text);
+                        self.pre_fence_text = held_back.to_string();
+                    } else {
+                        result.push_str(remaining);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Prepend any held-back text from previous call
+        if !self.pre_fence_text.is_empty() {
+            let held = std::mem::take(&mut self.pre_fence_text);
+            // If we're not in a code block and didn't find a fence, the held text was safe
+            if !self.in_code_block && !result.starts_with("```") {
+                result = held + &result;
+            }
+        }
+
+        result
+    }
+
+    /// Check for partial fence at end of text that might be completed in next chunk
+    ///
+    /// Returns `Some((safe_text, held_back))` if there's a potential partial fence,
+    /// `None` if the text is safe to emit entirely.
+    fn check_partial_fence(text: &str) -> Option<(&str, &str)> {
+        // Check if text ends with ` or `` which could become ```
+        if text.ends_with("``") {
+            let split = text.len() - 2;
+            Some((&text[..split], &text[split..]))
+        } else if text.ends_with('`') {
+            let split = text.len() - 1;
+            Some((&text[..split], &text[split..]))
+        } else {
+            None
+        }
+    }
+
     /// Flush remaining buffer content (called on text.done)
+    ///
+    /// If there's an unclosed code block, it's treated as literal text per FR-016a.
     pub fn flush(&mut self) -> Option<Sentence> {
-        let text = std::mem::take(&mut self.buffer).trim().to_string();
+        let mut text = std::mem::take(&mut self.buffer);
+
+        // Handle unclosed code block - treat as literal text
+        if self.in_code_block {
+            // The opening fence and any content should be treated as literal
+            // Reconstruct the original text: ``` + any accumulated content
+            let code_content = std::mem::take(&mut self.code_block_content);
+            text.push_str("```");
+            text.push_str(&code_content);
+            self.in_code_block = false;
+        }
+
+        // Include any held-back partial fence text
+        if !self.pre_fence_text.is_empty() {
+            text.push_str(&std::mem::take(&mut self.pre_fence_text));
+        }
+
+        let text = text.trim().to_string();
         if text.is_empty() {
             return None;
         }
@@ -688,6 +851,309 @@ mod tests {
                 "Dr. Smith and Mrs. Jones met at 3 p.m. to discuss the project.",
                 "Dr. Smith and Mrs. Jones met at 3 p.m. to discuss the project.",
             );
+        }
+    }
+
+    /// Tests for FR-016a: Sentence buffer MUST detect and handle fenced code blocks
+    mod code_block_tests {
+        use super::*;
+        use crate::session::CodeBlockMode;
+
+        /// Create a buffer with the specified code block mode
+        fn buffer_with_mode(mode: CodeBlockMode) -> SentenceBuffer {
+            SentenceBuffer::new(BufferConfig::default().with_code_block_mode(mode))
+        }
+
+        // ========== Skip Mode Tests ==========
+
+        #[test]
+        fn test_code_block_skip_mode_basic() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::Skip);
+
+            // Text with a code block in the middle
+            let sentences = buffer.push("Hello world. ```\nsome code\n``` More text. ");
+
+            // Code block should be skipped entirely
+            assert_eq!(sentences.len(), 2);
+            assert_eq!(sentences[0].text, "Hello world.");
+            assert_eq!(sentences[1].text, "More text.");
+        }
+
+        #[test]
+        fn test_code_block_skip_with_language_specifier() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::Skip);
+
+            let sentences = buffer.push("Check this. ```rust\nfn main() {}\n``` That's it. ");
+
+            // Code block with language specifier should be skipped
+            assert_eq!(sentences.len(), 2);
+            assert_eq!(sentences[0].text, "Check this.");
+            assert_eq!(sentences[1].text, "That's it.");
+        }
+
+        #[test]
+        fn test_code_block_skip_multiline() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::Skip);
+
+            let sentences = buffer
+                .push("First sentence. ```python\ndef foo():\n    return 42\n``` Last sentence. ");
+
+            assert_eq!(sentences.len(), 2);
+            assert_eq!(sentences[0].text, "First sentence.");
+            assert_eq!(sentences[1].text, "Last sentence.");
+        }
+
+        // ========== ReadLiterally Mode Tests ==========
+
+        #[test]
+        fn test_code_block_read_literally() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::ReadLiterally);
+
+            let sentences = buffer.push("Start. ```\ncode here\n``` End. ");
+
+            // In ReadLiterally mode, everything passes through as-is
+            // The text "Start. ```\ncode here\n``` End." should be processed normally
+            assert!(!sentences.is_empty());
+
+            // Flush to get any remaining content
+            let remaining = buffer.flush();
+            let all_text: String = sentences
+                .iter()
+                .map(|s| s.text.clone())
+                .chain(remaining.map(|s| s.text))
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            // The backticks should be present in the output
+            assert!(all_text.contains("```"));
+            assert!(all_text.contains("code here"));
+        }
+
+        #[test]
+        fn test_code_block_read_literally_with_language() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::ReadLiterally);
+
+            let _ = buffer.push("Hello. ```rust\nfn main() {}\n``` Bye.");
+            let remaining = buffer.flush();
+
+            assert!(remaining.is_some());
+            let text = remaining.unwrap().text;
+            // Content should include the code
+            assert!(text.contains("```") || text.contains("fn main"));
+        }
+
+        // ========== AnnounceAndSkip Mode Tests ==========
+
+        #[test]
+        fn test_code_block_announce_and_skip() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::AnnounceAndSkip);
+
+            let sentences = buffer.push("Before. ```\nsome code\n``` After. ");
+
+            // Should emit "code block" instead of actual content
+            assert_eq!(sentences.len(), 3);
+            assert_eq!(sentences[0].text, "Before.");
+            assert_eq!(sentences[1].text, "code block.");
+            assert_eq!(sentences[2].text, "After.");
+        }
+
+        #[test]
+        fn test_code_block_announce_with_language_specifier() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::AnnounceAndSkip);
+
+            let sentences = buffer.push("See this. ```javascript\nconsole.log('hi');\n``` Done. ");
+
+            assert_eq!(sentences.len(), 3);
+            assert_eq!(sentences[0].text, "See this.");
+            assert_eq!(sentences[1].text, "code block.");
+            assert_eq!(sentences[2].text, "Done.");
+        }
+
+        // ========== Unclosed Code Block Tests ==========
+
+        #[test]
+        fn test_unclosed_code_block_treated_as_literal_on_flush() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::Skip);
+
+            // Push text with unclosed code block
+            let sentences = buffer.push("Hello. ```\nsome code without closing");
+
+            // Should have first sentence
+            assert_eq!(sentences.len(), 1);
+            assert_eq!(sentences[0].text, "Hello.");
+
+            // On flush, unclosed code block should be treated as literal
+            let remaining = buffer.flush();
+            assert!(remaining.is_some());
+            let text = remaining.unwrap().text;
+            // The text should contain the literal backticks since block wasn't closed
+            assert!(text.contains("```"));
+            assert!(text.contains("some code without closing"));
+        }
+
+        #[test]
+        fn test_unclosed_code_block_announce_mode() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::AnnounceAndSkip);
+
+            let sentences = buffer.push("Start. ```python\nincomplete");
+
+            assert_eq!(sentences.len(), 1);
+            assert_eq!(sentences[0].text, "Start.");
+
+            // On flush, unclosed block treated as literal
+            let remaining = buffer.flush();
+            assert!(remaining.is_some());
+            let text = remaining.unwrap().text;
+            assert!(text.contains("```"));
+        }
+
+        // ========== Multiple Code Blocks Tests ==========
+
+        #[test]
+        fn test_multiple_code_blocks_skip() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::Skip);
+
+            let sentences = buffer.push("First. ```\ncode1\n``` Second. ```\ncode2\n``` Third. ");
+
+            assert_eq!(sentences.len(), 3);
+            assert_eq!(sentences[0].text, "First.");
+            assert_eq!(sentences[1].text, "Second.");
+            assert_eq!(sentences[2].text, "Third.");
+        }
+
+        #[test]
+        fn test_multiple_code_blocks_announce() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::AnnounceAndSkip);
+
+            let sentences = buffer.push("A. ```\nx\n``` B. ```\ny\n``` C. ");
+
+            // Should have: A, code block, B, code block, C
+            assert_eq!(sentences.len(), 5);
+            assert_eq!(sentences[0].text, "A.");
+            assert_eq!(sentences[1].text, "code block.");
+            assert_eq!(sentences[2].text, "B.");
+            assert_eq!(sentences[3].text, "code block.");
+            assert_eq!(sentences[4].text, "C.");
+        }
+
+        // ========== Streaming (Chunked) Input Tests ==========
+
+        #[test]
+        fn test_code_block_split_across_chunks_skip() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::Skip);
+
+            // First chunk: opening fence
+            let s1 = buffer.push("Hello. ```python\n");
+            assert_eq!(s1.len(), 1);
+            assert_eq!(s1[0].text, "Hello.");
+
+            // Second chunk: code content
+            let s2 = buffer.push("def foo():\n    pass\n");
+            assert!(s2.is_empty()); // Still in code block
+
+            // Third chunk: closing fence and more text
+            let s3 = buffer.push("``` Goodbye. ");
+            assert_eq!(s3.len(), 1);
+            assert_eq!(s3[0].text, "Goodbye.");
+        }
+
+        #[test]
+        fn test_code_block_split_across_chunks_announce() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::AnnounceAndSkip);
+
+            let s1 = buffer.push("Start. ```\n");
+            assert_eq!(s1.len(), 1);
+            assert_eq!(s1[0].text, "Start.");
+
+            let s2 = buffer.push("code content\n");
+            assert!(s2.is_empty());
+
+            let s3 = buffer.push("``` End. ");
+            assert_eq!(s3.len(), 2);
+            assert_eq!(s3[0].text, "code block.");
+            assert_eq!(s3[1].text, "End.");
+        }
+
+        // ========== Edge Cases ==========
+
+        #[test]
+        fn test_empty_code_block_skip() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::Skip);
+
+            // Use proper code block with newlines: opening ```, newline, closing ```
+            let sentences = buffer.push("Before. ```\n``` After. ");
+
+            // Empty code block should be skipped
+            assert_eq!(sentences.len(), 2);
+            assert_eq!(sentences[0].text, "Before.");
+            assert_eq!(sentences[1].text, "After.");
+        }
+
+        #[test]
+        fn test_empty_code_block_announce() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::AnnounceAndSkip);
+
+            let sentences = buffer.push("X. ```\n``` Y. ");
+
+            assert_eq!(sentences.len(), 3);
+            assert_eq!(sentences[0].text, "X.");
+            assert_eq!(sentences[1].text, "code block.");
+            assert_eq!(sentences[2].text, "Y.");
+        }
+
+        #[test]
+        fn test_code_block_at_start() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::Skip);
+
+            let sentences = buffer.push("```\ncode\n``` After. ");
+
+            assert_eq!(sentences.len(), 1);
+            assert_eq!(sentences[0].text, "After.");
+        }
+
+        #[test]
+        fn test_code_block_at_end() {
+            let mut buffer = buffer_with_mode(CodeBlockMode::Skip);
+
+            let sentences = buffer.push("Before. ```\ncode\n```");
+
+            assert_eq!(sentences.len(), 1);
+            assert_eq!(sentences[0].text, "Before.");
+
+            // Flush should return nothing since code block is closed but empty after
+            let remaining = buffer.flush();
+            assert!(remaining.is_none());
+        }
+
+        #[test]
+        fn test_nested_fences_first_closes() {
+            // Per FR-016a: Nested code blocks are not supported;
+            // the first closing fence ends the block
+            let mut buffer = buffer_with_mode(CodeBlockMode::Skip);
+
+            // Input: "A. ```\nouter\n``` middle ``` more\n```"
+            // Expected: "A." emitted, first code block skipped, "middle" visible,
+            // second code block starts and closes
+            let sentences = buffer.push("A. ```\nouter\n``` middle. ```\nmore\n``` B. ");
+
+            // "A." is first sentence, "middle." after first code block closes,
+            // then second code block is skipped, then "B."
+            assert_eq!(
+                sentences.len(),
+                3,
+                "Expected 3 sentences, got {:?}",
+                sentences
+            );
+            assert_eq!(sentences[0].text, "A.");
+            assert_eq!(sentences[1].text, "middle.");
+            assert_eq!(sentences[2].text, "B.");
+        }
+
+        #[test]
+        fn test_default_mode_is_skip() {
+            // BufferConfig default should be Skip mode
+            let config = BufferConfig::default();
+            assert_eq!(config.code_block_mode, CodeBlockMode::Skip);
         }
     }
 }

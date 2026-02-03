@@ -211,6 +211,7 @@ impl From<BufferConfigToml> for crate::buffer::BufferConfig {
         Self {
             flush_timeout: Duration::from_millis(toml.flush_timeout_ms),
             max_size: toml.max_size_bytes,
+            code_block_mode: crate::session::CodeBlockMode::default(),
         }
     }
 }

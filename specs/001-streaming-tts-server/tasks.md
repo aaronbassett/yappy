@@ -408,10 +408,10 @@
 - [x] T208 [GIT] Commit: add abbreviation rules (committed in T206)
 - [x] T209 [US7] Add custom SRX rules for decimal numbers (3.14, 2.5) in crates/yappy-core/src/buffer.rs (implemented in T205)
 - [x] T210 [GIT] Commit: add decimal rules (committed in T206)
-- [ ] T211 [US7] Implement flush timeout logic in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
-- [ ] T212 [GIT] Commit: add flush timeout
-- [ ] T213 [US7] Implement max buffer overflow with clause/word boundary split in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
-- [ ] T214 [GIT] Commit: add buffer overflow handling
+- [x] T211 [US7] Implement flush timeout logic in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
+- [x] T212 [GIT] Commit: add flush timeout
+- [x] T213 [US7] Implement max buffer overflow with clause/word boundary split in crates/yappy-core/src/buffer.rs (pre-existing in force_flush())
+- [x] T214 [GIT] Commit: add buffer overflow handling (committed in T212)
 - [ ] T215 [US7] Implement code block detection and handling (skip, read_literally modes) in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
 - [ ] T215a [US7] Implement announce-and-skip code block mode with synthetic "code block" text emission in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
 - [ ] T216 [GIT] Commit: add code block handling
