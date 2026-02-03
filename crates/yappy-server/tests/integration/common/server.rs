@@ -40,6 +40,16 @@ impl TestServer {
         format!("http://{}", self.addr)
     }
 
+    /// Connect to this server's WebSocket endpoint
+    pub async fn connect_ws(
+        &self,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
+        connect_ws(self)
+            .await
+            .expect("Failed to connect to WebSocket")
+    }
+
     /// Shutdown the test server gracefully
     pub fn shutdown(mut self) {
         if let Some(tx) = self.shutdown_tx.take() {

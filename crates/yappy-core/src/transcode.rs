@@ -897,12 +897,12 @@ mod tests {
         let result = encoder.encode(&pcm);
         assert!(result.is_ok(), "Encoding should succeed");
 
-        let encoded = result.unwrap();
+        let mp3_data = result.unwrap();
         // MP3 output should not be empty when given sufficient input
         // Note: For very small inputs, LAME may produce empty output during encode
         // and only produce data during flush
         assert!(
-            !encoded.is_empty(),
+            !mp3_data.is_empty(),
             "MP3 output should not be empty with {} samples",
             pcm.len()
         );

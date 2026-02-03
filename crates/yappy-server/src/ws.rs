@@ -519,9 +519,7 @@ where
     // Resolve and validate audio format
     let audio_format = if let Some(requested) = requested_format {
         // Client requested a specific format - validate it
-        let Some(resolved) =
-            negotiate_audio_format(&metadata.supported_formats, &requested)
-        else {
+        let Some(resolved) = negotiate_audio_format(&metadata.supported_formats, &requested) else {
             // Format cannot be provided (not native and can't transcode)
             let available_codecs: Vec<String> = metadata
                 .supported_formats
@@ -533,7 +531,9 @@ where
                 format!(
                     "Audio format '{}' is not available for provider '{}'. Available: {}. \
                      Transcoding from PCM is supported for: opus, mp3.",
-                    requested.codec, provider_id, available_codecs.join(", ")
+                    requested.codec,
+                    provider_id,
+                    available_codecs.join(", ")
                 ),
             );
             if let Err(err) = send_server_message(sender, &response).await {
@@ -878,9 +878,7 @@ fn negotiate_audio_format(
     requested: &AudioFormat,
 ) -> Option<AudioFormat> {
     // Check if the exact codec is natively supported
-    let native_support = supported_formats
-        .iter()
-        .any(|f| f.codec == requested.codec);
+    let native_support = supported_formats.iter().any(|f| f.codec == requested.codec);
 
     if native_support {
         // Provider natively supports this codec - use the requested format
@@ -888,9 +886,7 @@ fn negotiate_audio_format(
     }
 
     // Check if we can transcode from PCM to the requested format
-    let provider_supports_pcm = supported_formats
-        .iter()
-        .any(|f| f.codec == AudioCodec::Pcm);
+    let provider_supports_pcm = supported_formats.iter().any(|f| f.codec == AudioCodec::Pcm);
 
     if provider_supports_pcm && Transcoder::can_transcode(AudioCodec::Pcm, requested.codec) {
         // We can transcode from PCM to the requested format
@@ -1752,6 +1748,7 @@ mod tests {
     }
 
     /// Helper to create a provider registry with specific supported formats
+    #[allow(clippy::items_after_statements)]
     fn create_test_registry_with_formats(formats: Vec<AudioFormat>) -> ProviderRegistry {
         let mut registry = ProviderRegistry::new();
 
@@ -1789,7 +1786,8 @@ mod tests {
                 _voice: &VoiceConfig,
                 _format: AudioFormat,
                 _cancel: CancellationToken,
-            ) -> Result<yappy_core::audio::AudioStream, yappy_core::error::ProviderError> {
+            ) -> Result<yappy_core::audio::AudioStream, yappy_core::error::ProviderError>
+            {
                 // Return an empty stream
                 Ok(Box::pin(stream::empty()))
             }

@@ -69,6 +69,8 @@ pub struct MockTtsProvider {
     status: ProviderStatus,
     /// Available voices
     voices: Vec<VoiceInfo>,
+    /// Supported audio formats
+    formats: Vec<AudioFormat>,
     /// Synthesis behavior configuration
     synthesis_mode: MockSynthesisMode,
     /// Count of synthesize calls (for testing)
@@ -100,6 +102,7 @@ impl MockTtsProvider {
                     sample_url: None,
                 },
             ],
+            formats: vec![AudioFormat::default()],
             synthesis_mode: MockSynthesisMode::default(),
             synthesize_count: AtomicUsize::new(0),
             available: AtomicBool::new(true),
@@ -121,6 +124,7 @@ impl MockTtsProvider {
                 reason: reason.to_string(),
             },
             voices: vec![],
+            formats: vec![AudioFormat::default()],
             synthesis_mode: MockSynthesisMode::default(),
             synthesize_count: AtomicUsize::new(0),
             available: AtomicBool::new(false),
@@ -140,6 +144,27 @@ impl MockTtsProvider {
                 gender: None,
                 sample_url: None,
             }],
+            formats: vec![AudioFormat::default()],
+            synthesis_mode: MockSynthesisMode::default(),
+            synthesize_count: AtomicUsize::new(0),
+            available: AtomicBool::new(true),
+        }
+    }
+
+    /// Create a mock provider with specific supported formats
+    pub fn with_formats(id: &str, formats: Vec<AudioFormat>) -> Self {
+        Self {
+            id: id.to_string(),
+            name: format!("Mock {id}"),
+            status: ProviderStatus::Available,
+            voices: vec![VoiceInfo {
+                id: "test_voice_1".to_string(),
+                name: "Test Voice 1".to_string(),
+                language: "en-US".to_string(),
+                gender: None,
+                sample_url: None,
+            }],
+            formats,
             synthesis_mode: MockSynthesisMode::default(),
             synthesize_count: AtomicUsize::new(0),
             available: AtomicBool::new(true),
@@ -166,7 +191,7 @@ impl TtsProvider for MockTtsProvider {
             name: self.name.clone(),
             description: format!("Mock {} provider for testing", self.name),
             voices: self.voices.clone(),
-            supported_formats: vec![AudioFormat::default()],
+            supported_formats: self.formats.clone(),
             options_schema: None,
         }
     }
