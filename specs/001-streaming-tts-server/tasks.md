@@ -58,9 +58,9 @@
 **CRITICAL**: No user story work can begin until this phase is complete
 
 ### Phase Start
-- [ ] T015 [GIT] Verify working tree is clean before starting Phase 2
-- [ ] T016 [GIT] Pull and rebase on origin/main if needed
-- [ ] T017 Create specs/001-streaming-tts-server/retro/P2.md for this phase
+- [x] T015 [GIT] Verify working tree is clean before starting Phase 2
+- [x] T016 [GIT] Pull and rebase on origin/main if needed
+- [x] T017 Create specs/001-streaming-tts-server/retro/P2.md for this phase
 
 ### Core Types (yappy-core)
 - [ ] T018 [GIT] Commit: initialize phase 2 retro
