@@ -9,6 +9,7 @@ description = "OpenAI TTS provider for Yappy"
 [dependencies]
 yappy-core = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }

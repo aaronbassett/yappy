@@ -527,10 +527,10 @@
 - [x] T267 [GIT] Verify working tree is clean before starting Phase 12
 - [x] T268 [GIT] Pull and rebase on origin/main if needed (already up to date)
 - [x] T269 Create specs/001-streaming-tts-server/retro/P12.md for this phase
-- [ ] T270 [GIT] Commit: initialize phase 12 retro
+- [x] T270 [GIT] Commit: initialize phase 12 retro
 
 ### OpenAI Provider
-- [ ] T271 Implement OpenAI TtsProvider in crates/yappy-provider-openai/src/lib.rs (use devs:rust-dev agent)
+- [x] T271 Implement OpenAI TtsProvider in crates/yappy-provider-openai/src/lib.rs (use devs:rust-dev agent)
   - **Depends on**: Phase 3 (US1) and Phase 4 (US2) complete - requires TtsProvider trait and ProviderRegistry
 - [ ] T272 [GIT] Commit: add OpenAI provider skeleton
 - [ ] T273 Implement reqwest streaming for OpenAI TTS API in crates/yappy-provider-openai/src/lib.rs (use devs:rust-dev agent)
