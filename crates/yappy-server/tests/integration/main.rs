@@ -5,6 +5,7 @@
 
 mod common;
 mod health_check;
+mod shutdown;
 mod ws_backpressure;
 mod ws_basic;
 mod ws_buffer;
