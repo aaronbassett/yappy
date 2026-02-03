@@ -1354,6 +1354,7 @@ mod tests {
         }
 
         /// Get backpressure metrics for assertions.
+        #[allow(dead_code)]
         fn backpressure_events(&self) -> u64 {
             self.bp_sender.metrics().event_count()
         }
