@@ -32,10 +32,10 @@ where
     S: SinkExt<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
-    let json = serde_json::to_string(msg).map_err(|e| format!("Serialization error: {}", e))?;
+    let json = serde_json::to_string(msg).map_err(|e| format!("Serialization error: {e}"))?;
     ws.send(Message::Text(json.into()))
         .await
-        .map_err(|e| format!("Send error: {}", e))
+        .map_err(|e| format!("Send error: {e}"))
 }
 
 /// Receive the next text message from a WebSocket stream
@@ -45,8 +45,8 @@ where
 {
     match ws.next().await {
         Some(Ok(Message::Text(text))) => Ok(text.to_string()),
-        Some(Ok(other)) => Err(format!("Expected text message, got: {:?}", other)),
-        Some(Err(e)) => Err(format!("Receive error: {}", e)),
+        Some(Ok(other)) => Err(format!("Expected text message, got: {other:?}")),
+        Some(Err(e)) => Err(format!("Receive error: {e}")),
         None => Err("Connection closed".to_string()),
     }
 }
@@ -58,8 +58,8 @@ where
 {
     match ws.next().await {
         Some(Ok(Message::Binary(data))) => Ok(data.to_vec()),
-        Some(Ok(other)) => Err(format!("Expected binary message, got: {:?}", other)),
-        Some(Err(e)) => Err(format!("Receive error: {}", e)),
+        Some(Ok(other)) => Err(format!("Expected binary message, got: {other:?}")),
+        Some(Err(e)) => Err(format!("Receive error: {e}")),
         None => Err("Connection closed".to_string()),
     }
 }
@@ -70,7 +70,7 @@ where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
     let text = receive_text(ws).await?;
-    serde_json::from_str(&text).map_err(|e| format!("Parse error: {} (text: {})", e, text))
+    serde_json::from_str(&text).map_err(|e| format!("Parse error: {e} (text: {text})"))
 }
 
 /// Receive and parse a server message with timeout
@@ -104,7 +104,7 @@ where
 
 /// Send session.init and wait for session.ready
 ///
-/// Returns the session_id from the session.ready response.
+/// Returns the `session_id` from the session.ready response.
 pub async fn init_session<S>(ws: &mut S, provider: Option<&str>) -> Result<String, String>
 where
     S: SinkExt<Message>
@@ -127,9 +127,9 @@ where
     match response {
         ServerMessage::SessionReady { session_id, .. } => Ok(session_id),
         ServerMessage::SessionError { code, message, .. } => {
-            Err(format!("Session error [{}]: {}", code, message))
+            Err(format!("Session error [{code}]: {message}"))
         }
-        other => Err(format!("Unexpected response: {:?}", other)),
+        other => Err(format!("Unexpected response: {other:?}")),
     }
 }
 
@@ -192,17 +192,13 @@ where
         let msg = timeout(DEFAULT_TIMEOUT, ws.next())
             .await
             .map_err(|_| "Timeout waiting for audio.done".to_string())?
-            .ok_or("Connection closed".to_string())?
-            .map_err(|e| format!("Receive error: {}", e))?;
+            .ok_or_else(|| "Connection closed".to_string())?
+            .map_err(|e| format!("Receive error: {e}"))?;
 
         match msg {
-            Message::Binary(_) => {
-                // Skip audio chunks (they might still be arriving)
-                continue;
-            }
             Message::Text(text) => {
                 let server_msg: ServerMessage =
-                    serde_json::from_str(&text).map_err(|e| format!("Parse error: {}", e))?;
+                    serde_json::from_str(&text).map_err(|e| format!("Parse error: {e}"))?;
 
                 match server_msg {
                     ServerMessage::AudioDone {
@@ -214,21 +210,21 @@ where
                     }
                     ServerMessage::Error { code, message, .. } => {
                         // Non-fatal error, continue waiting
-                        eprintln!("Warning: received error [{}]: {}", code, message);
-                        continue;
+                        eprintln!("Warning: received error [{code}]: {message}");
                     }
                     ServerMessage::SessionError { code, message, .. } => {
-                        return Err(format!("Session error [{}]: {}", code, message));
+                        return Err(format!("Session error [{code}]: {message}"));
                     }
-                    _ => {
-                        return Err(format!("Unexpected message: {:?}", server_msg));
+                    ServerMessage::SessionReady { .. } => {
+                        return Err("Unexpected SessionReady message".to_string());
                     }
                 }
             }
             Message::Close(_) => {
                 return Err("Connection closed before audio.done".to_string());
             }
-            _ => continue,
+            // Skip audio chunks and other messages (they might still be arriving)
+            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
     }
 }

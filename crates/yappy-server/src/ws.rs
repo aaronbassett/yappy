@@ -820,6 +820,7 @@ mod tests {
         }
 
         /// Extract text messages from the sink
+        #[allow(dead_code)]
         fn text_messages(&self) -> Vec<&str> {
             self.messages
                 .iter()
@@ -831,6 +832,7 @@ mod tests {
         }
 
         /// Extract binary messages from the sink
+        #[allow(dead_code)]
         fn binary_messages(&self) -> Vec<&[u8]> {
             self.messages
                 .iter()
@@ -885,6 +887,7 @@ mod tests {
         /// Return an error during synthesis initialization
         FailInit { error: String },
         /// Return an error mid-stream (after yielding some chunks)
+        #[allow(dead_code)]
         FailMidStream {
             chunks_before_error: usize,
             error: String,
@@ -945,6 +948,7 @@ mod tests {
     }
 
     #[async_trait]
+    #[allow(clippy::cast_possible_truncation)]
     impl TtsProvider for MockProvider {
         fn metadata(&self) -> ProviderMetadata {
             ProviderMetadata {
@@ -1058,7 +1062,7 @@ mod tests {
                     assert_eq!(voice, "test_voice");
                     assert_eq!(audio_format.codec, yappy_core::AudioCodec::Opus);
                 }
-                _ => panic!("Expected SessionReady, got {:?}", msg),
+                _ => panic!("Expected SessionReady, got {msg:?}"),
             }
         } else {
             panic!("Expected text message");
@@ -1114,7 +1118,7 @@ mod tests {
                 ServerMessage::SessionError { code, .. } => {
                     assert_eq!(code, "no_providers");
                 }
-                _ => panic!("Expected SessionError, got {:?}", msg),
+                _ => panic!("Expected SessionError, got {msg:?}"),
             }
         } else {
             panic!("Expected text message");
@@ -1147,7 +1151,7 @@ mod tests {
                     let alts = alternatives.unwrap();
                     assert!(alts.contains(&"test".to_string()));
                 }
-                _ => panic!("Expected SessionError, got {:?}", msg),
+                _ => panic!("Expected SessionError, got {msg:?}"),
             }
         } else {
             panic!("Expected text message");
@@ -1188,7 +1192,7 @@ mod tests {
                     let alts = alternatives.unwrap();
                     assert!(alts.contains(&"working".to_string()));
                 }
-                _ => panic!("Expected SessionError, got {:?}", msg),
+                _ => panic!("Expected SessionError, got {msg:?}"),
             }
         }
     }
@@ -1220,7 +1224,7 @@ mod tests {
                 ServerMessage::Error { code, .. } => {
                     assert_eq!(code, "session_already_initialized");
                 }
-                _ => panic!("Expected Error, got {:?}", msg),
+                _ => panic!("Expected Error, got {msg:?}"),
             }
         }
     }
@@ -1245,7 +1249,7 @@ mod tests {
                 ServerMessage::Error { code, .. } => {
                     assert_eq!(code, "no_session");
                 }
-                _ => panic!("Expected Error, got {:?}", msg),
+                _ => panic!("Expected Error, got {msg:?}"),
             }
         }
     }
@@ -1268,7 +1272,7 @@ mod tests {
                 ServerMessage::Error { code, .. } => {
                     assert_eq!(code, "no_session");
                 }
-                _ => panic!("Expected Error, got {:?}", msg),
+                _ => panic!("Expected Error, got {msg:?}"),
             }
         }
     }
@@ -1523,7 +1527,7 @@ mod tests {
                     assert_eq!(total_duration_ms, 0);
                     assert_eq!(total_bytes, 0);
                 }
-                _ => panic!("Expected AudioDone, got {:?}", msg),
+                _ => panic!("Expected AudioDone, got {msg:?}"),
             }
         } else {
             panic!("Expected text message");
@@ -1586,7 +1590,7 @@ mod tests {
                     assert_eq!(total_duration_ms, 300); // 3 sentences * 100ms
                     assert_eq!(total_bytes, 768); // 3 sentences * 256 bytes
                 }
-                _ => panic!("Expected AudioDone, got {:?}", msg),
+                _ => panic!("Expected AudioDone, got {msg:?}"),
             }
         } else {
             panic!("Expected text message for audio.done");
@@ -1668,7 +1672,7 @@ mod tests {
                     assert_eq!(total_duration_ms, 200); // 2 sentences * 100ms
                     assert_eq!(total_bytes, 512); // 2 sentences * 256 bytes
                 }
-                _ => panic!("Expected AudioDone, got {:?}", msg),
+                _ => panic!("Expected AudioDone, got {msg:?}"),
             }
         } else {
             panic!("Expected text message for audio.done");
@@ -1758,7 +1762,7 @@ mod tests {
                     assert!(!fatal);
                     assert_eq!(sentence_index, Some(0));
                 }
-                _ => panic!("Expected Error, got {:?}", msg),
+                _ => panic!("Expected Error, got {msg:?}"),
             }
         } else {
             panic!("Expected text message");
@@ -1766,6 +1770,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::cast_possible_truncation)]
     async fn test_multiple_sentences_sequence_numbers() {
         let mut sink = MockSink::new();
         let mut session = None;
@@ -1792,7 +1797,7 @@ mod tests {
                 assert_eq!(sequence, i as u32);
                 assert_eq!(sentence_index, i as u32);
             } else {
-                panic!("Expected binary message at index {}", i);
+                panic!("Expected binary message at index {i}");
             }
         }
 

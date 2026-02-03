@@ -82,7 +82,7 @@ impl MockTtsProvider {
     pub fn new(id: &str) -> Self {
         Self {
             id: id.to_string(),
-            name: format!("Mock {}", id),
+            name: format!("Mock {id}"),
             status: ProviderStatus::Available,
             voices: vec![
                 VoiceInfo {
@@ -116,7 +116,7 @@ impl MockTtsProvider {
     pub fn unavailable(id: &str, reason: &str) -> Self {
         Self {
             id: id.to_string(),
-            name: format!("Mock {}", id),
+            name: format!("Mock {id}"),
             status: ProviderStatus::Unavailable {
                 reason: reason.to_string(),
             },
@@ -139,6 +139,7 @@ impl MockTtsProvider {
 }
 
 #[async_trait]
+#[allow(clippy::cast_possible_truncation)]
 impl TtsProvider for MockTtsProvider {
     fn metadata(&self) -> ProviderMetadata {
         ProviderMetadata {

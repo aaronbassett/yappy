@@ -92,7 +92,7 @@ impl TestServerBuilder {
 
     /// Add a custom mock provider
     pub fn with_provider(mut self, provider: MockTtsProvider) -> Self {
-        let id = provider.metadata().id.0.clone();
+        let id = provider.metadata().id.0;
         self.registry.register(provider);
         if self.default_provider.is_none() {
             self.default_provider = Some(id);
@@ -150,7 +150,7 @@ impl TestServerBuilder {
             });
 
             if let Err(e) = server.await {
-                eprintln!("Test server error: {}", e);
+                eprintln!("Test server error: {e}");
             }
         });
 
@@ -204,7 +204,7 @@ pub async fn connect_ws_with_timeout(
     timeout(timeout_duration, connect_ws(server))
         .await
         .map_err(|_| "Connection timeout".to_string())?
-        .map_err(|e| format!("WebSocket connection error: {}", e))
+        .map_err(|e| format!("WebSocket connection error: {e}"))
 }
 
 #[cfg(test)]

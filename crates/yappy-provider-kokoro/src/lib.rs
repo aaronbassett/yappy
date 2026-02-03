@@ -1328,7 +1328,7 @@ mod tests {
         assert!(voice_ids.contains(&"bm_lewis"));
 
         // Verify American voices have en-US language
-        for voice in voices.iter().filter(|v| v.id.starts_with("a")) {
+        for voice in voices.iter().filter(|v| v.id.starts_with('a')) {
             assert_eq!(
                 voice.language, "en-US",
                 "American voice {} should have en-US language",
@@ -1337,7 +1337,7 @@ mod tests {
         }
 
         // Verify British voices have en-GB language
-        for voice in voices.iter().filter(|v| v.id.starts_with("b")) {
+        for voice in voices.iter().filter(|v| v.id.starts_with('b')) {
             assert_eq!(
                 voice.language, "en-GB",
                 "British voice {} should have en-GB language",
@@ -1375,8 +1375,7 @@ mod tests {
             ProviderStatus::NotConfigured { reason } => {
                 assert!(
                     reason.contains("not loaded"),
-                    "Reason should mention model not loaded: {}",
-                    reason
+                    "Reason should mention model not loaded: {reason}"
                 );
             }
             _ => panic!("Expected NotConfigured status"),
@@ -1397,8 +1396,7 @@ mod tests {
             ProviderStatus::NotConfigured { reason } => {
                 assert!(
                     reason.contains("not loaded"),
-                    "Reason should mention model not loaded: {}",
-                    reason
+                    "Reason should mention model not loaded: {reason}"
                 );
             }
             _ => panic!("Expected NotConfigured status"),
@@ -1423,12 +1421,11 @@ mod tests {
             Err(ProviderError::NotConfigured { reason }) => {
                 assert!(
                     reason.contains("not loaded"),
-                    "Error should mention model not loaded: {}",
-                    reason
+                    "Error should mention model not loaded: {reason}"
                 );
             }
             Ok(_) => panic!("Expected NotConfigured error, got Ok"),
-            Err(e) => panic!("Expected NotConfigured error, got: {:?}", e),
+            Err(e) => panic!("Expected NotConfigured error, got: {e:?}"),
         }
     }
 
@@ -1447,12 +1444,11 @@ mod tests {
             Err(ProviderError::InitializationFailed { message }) => {
                 assert!(
                     message.contains("Failed to load ONNX model"),
-                    "Error should mention ONNX model loading failure: {}",
-                    message
+                    "Error should mention ONNX model loading failure: {message}"
                 );
             }
-            Ok(_) => panic!("Expected InitializationFailed error, got Ok"),
-            Err(e) => panic!("Expected InitializationFailed error, got: {:?}", e),
+            Ok(()) => panic!("Expected InitializationFailed error, got Ok"),
+            Err(e) => panic!("Expected InitializationFailed error, got: {e:?}"),
         }
 
         // Model should still be not loaded
@@ -1473,7 +1469,7 @@ mod tests {
         assert!(!provider.is_model_loaded());
     }
 
-    /// Integration test for actual model loading from HuggingFace.
+    /// Integration test for actual model loading from `HuggingFace`.
     /// This test is ignored by default as it requires network access
     /// and downloads ~200MB of model files.
     #[tokio::test]
@@ -1482,15 +1478,14 @@ mod tests {
         let provider = KokoroProvider::with_defaults();
         let result = provider.load_model().await;
 
-        assert!(result.is_ok(), "Model loading failed: {:?}", result);
+        assert!(result.is_ok(), "Model loading failed: {result:?}");
         assert!(provider.is_model_loaded());
 
         // Verify health check returns Available
         let status = provider.health_check().await;
         assert!(
             matches!(status, ProviderStatus::Available),
-            "Expected Available status, got: {:?}",
-            status
+            "Expected Available status, got: {status:?}"
         );
     }
 
@@ -1522,7 +1517,7 @@ mod tests {
         assert!(!provider.is_model_loaded());
     }
 
-    /// Integration test for ensure_model_loaded from HuggingFace.
+    /// Integration test for `ensure_model_loaded` from `HuggingFace`.
     /// This test is ignored by default as it requires network access.
     #[tokio::test]
     #[ignore = "requires network access and downloads large model files"]
@@ -1533,8 +1528,7 @@ mod tests {
         let result = provider.ensure_model_loaded().await;
         assert!(
             result.is_ok(),
-            "First ensure_model_loaded failed: {:?}",
-            result
+            "First ensure_model_loaded failed: {result:?}"
         );
         assert!(provider.is_model_loaded());
 
@@ -1542,8 +1536,7 @@ mod tests {
         let result = provider.ensure_model_loaded().await;
         assert!(
             result.is_ok(),
-            "Second ensure_model_loaded failed: {:?}",
-            result
+            "Second ensure_model_loaded failed: {result:?}"
         );
     }
 
@@ -1601,6 +1594,7 @@ mod tests {
     // ========================================================================
 
     #[test]
+    #[allow(clippy::cast_precision_loss)]
     fn test_create_pcm_chunks_basic() {
         // Create some test samples (sine wave)
         let samples: Vec<f32> = (0..SAMPLES_PER_CHUNK * 2)
@@ -1657,6 +1651,7 @@ mod tests {
     // ========================================================================
 
     #[test]
+    #[allow(clippy::cast_precision_loss)]
     fn test_create_opus_chunks_basic() {
         // Create some test samples (sine wave)
         let samples: Vec<f32> = (0..SAMPLES_PER_CHUNK * 2)
@@ -1694,6 +1689,7 @@ mod tests {
     /// and downloads ~200MB of model files.
     #[tokio::test]
     #[ignore = "requires network access and downloads large model files"]
+    #[allow(clippy::items_after_statements)]
     async fn test_full_synthesis_pcm() {
         let provider = KokoroProvider::with_defaults();
         provider.load_model().await.expect("Failed to load model");
@@ -1735,14 +1731,14 @@ mod tests {
         let total_duration: u32 = chunks.iter().map(|c| c.duration_ms).sum();
         assert!(
             total_duration > 100,
-            "Audio too short: {}ms",
-            total_duration
+            "Audio too short: {total_duration}ms"
         );
     }
 
     /// Full synthesis integration test with Opus encoding.
     #[tokio::test]
     #[ignore = "requires network access and downloads large model files"]
+    #[allow(clippy::items_after_statements)]
     async fn test_full_synthesis_opus() {
         let provider = KokoroProvider::with_defaults();
         provider.load_model().await.expect("Failed to load model");

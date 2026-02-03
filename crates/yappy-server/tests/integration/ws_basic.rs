@@ -31,7 +31,7 @@ use crate::common::{
 /// 1. Connect to /ws endpoint
 /// 2. Send session.init message
 /// 3. Receive session.ready response
-/// 4. Verify session_id is returned
+/// 4. Verify `session_id` is returned
 #[tokio::test]
 async fn test_ws_connect_and_session_init() {
     let server = spawn_test_server().await;
@@ -69,13 +69,12 @@ async fn test_ws_connect_and_session_init() {
             // Voice should be one of the mock provider's voices
             assert!(
                 voice == "test_voice_1" || voice == "test_voice_2",
-                "Unexpected voice: {}",
-                voice
+                "Unexpected voice: {voice}"
             );
             // Audio format should be set
             assert_eq!(audio_format.sample_rate, 48000);
         }
-        other => panic!("Expected SessionReady, got: {:?}", other),
+        other => panic!("Expected SessionReady, got: {other:?}"),
     }
 
     server.shutdown();
@@ -136,6 +135,7 @@ async fn test_ws_session_init_specific_provider() {
 /// 4. Send text.done
 /// 5. Receive audio.done with statistics
 #[tokio::test]
+#[allow(clippy::cast_possible_truncation)]
 async fn test_ws_full_tts_flow() {
     let server = spawn_test_server().await;
     let mut ws = connect_ws(&server)
@@ -361,21 +361,18 @@ async fn test_ws_session_init_error_no_provider() {
             assert_eq!(code, "no_providers");
             assert!(message.contains("No TTS providers"));
         }
-        other => panic!("Expected SessionError, got: {:?}", other),
+        other => panic!("Expected SessionError, got: {other:?}"),
     }
 
     // Connection should be closed after fatal error
     // Try to receive - should get close or error
     let next = timeout(Duration::from_millis(500), ws.next()).await;
     match next {
-        Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Err(_) => {
-            // Expected - connection closed
+        Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) | Err(_) => {
+            // Expected - connection closed or error
         }
         Ok(Some(Ok(other))) => {
-            panic!("Expected connection close, got: {:?}", other);
-        }
-        Ok(Some(Err(_))) => {
-            // Connection error is also acceptable
+            panic!("Expected connection close, got: {other:?}");
         }
     }
 
@@ -414,7 +411,7 @@ async fn test_ws_session_init_error_provider_not_found() {
             let alts = alternatives.expect("Should have alternatives");
             assert!(alts.contains(&"mock".to_string()));
         }
-        other => panic!("Expected SessionError, got: {:?}", other),
+        other => panic!("Expected SessionError, got: {other:?}"),
     }
 
     server.shutdown();
@@ -446,7 +443,7 @@ async fn test_ws_text_without_session() {
             assert_eq!(code, "no_session");
             assert!(!fatal, "Should be non-fatal error");
         }
-        other => panic!("Expected Error, got: {:?}", other),
+        other => panic!("Expected Error, got: {other:?}"),
     }
 
     // Connection should still be open (non-fatal error)
@@ -481,7 +478,7 @@ async fn test_ws_text_done_without_session() {
             assert_eq!(code, "no_session");
             assert!(!fatal);
         }
-        other => panic!("Expected Error, got: {:?}", other),
+        other => panic!("Expected Error, got: {other:?}"),
     }
 
     server.shutdown();
@@ -520,7 +517,7 @@ async fn test_ws_double_session_init() {
             assert_eq!(code, "session_already_initialized");
             assert!(!fatal);
         }
-        other => panic!("Expected Error, got: {:?}", other),
+        other => panic!("Expected Error, got: {other:?}"),
     }
 
     server.shutdown();
@@ -548,7 +545,7 @@ async fn test_ws_invalid_json() {
             assert_eq!(code, "invalid_message");
             assert!(!fatal);
         }
-        other => panic!("Expected Error, got: {:?}", other),
+        other => panic!("Expected Error, got: {other:?}"),
     }
 
     server.shutdown();
@@ -576,7 +573,7 @@ async fn test_ws_unexpected_binary() {
             assert_eq!(code, "unexpected_binary");
             assert!(!fatal);
         }
-        other => panic!("Expected Error, got: {:?}", other),
+        other => panic!("Expected Error, got: {other:?}"),
     }
 
     server.shutdown();
@@ -633,7 +630,7 @@ async fn test_ws_synthesis_error() {
             assert!(!fatal);
             assert_eq!(sentence_index, Some(0));
         }
-        other => panic!("Expected Error, got: {:?}", other),
+        other => panic!("Expected Error, got: {other:?}"),
     }
 
     // Session should still be open - we can send text.done
@@ -699,6 +696,7 @@ async fn test_ws_multiple_chunks_per_sentence() {
     }
 
     // Sequence numbers should be unique and sequential
+    #[allow(clippy::cast_possible_truncation)]
     for (i, chunk) in chunks.iter().enumerate() {
         assert_eq!(chunk.sequence, i as u32);
     }
@@ -794,8 +792,8 @@ async fn test_ws_concurrent_connections() {
         .await
         .expect("Client 2 should receive audio");
 
-    assert!(chunk1.data.len() > 0);
-    assert!(chunk2.data.len() > 0);
+    assert!(!chunk1.data.is_empty());
+    assert!(!chunk2.data.is_empty());
 
     // Both should finish successfully
     finish_session(&mut ws1)
@@ -823,14 +821,11 @@ async fn test_ws_ping_pong() {
 
     // We may receive a Pong frame back - consume it if present
     // (Axum responds with Pong, and tokio-tungstenite may surface it)
-    match timeout(Duration::from_millis(100), ws.next()).await {
-        Ok(Some(Ok(Message::Pong(data)))) => {
-            // Pong payload should match ping payload
-            assert_eq!(data.as_ref(), &[1, 2, 3]);
-        }
-        _ => {
-            // No pong received (might be handled internally) - that's also fine
-        }
+    if let Ok(Some(Ok(Message::Pong(data)))) = timeout(Duration::from_millis(100), ws.next()).await {
+        // Pong payload should match ping payload
+        assert_eq!(data.as_ref(), &[1, 2, 3]);
+    } else {
+        // No pong received (might be handled internally) - that's also fine
     }
 
     // Verify connection is still working
@@ -852,7 +847,7 @@ async fn test_ws_ping_pong() {
         ServerMessage::SessionReady { .. } => {
             // Success - connection still works after ping/pong
         }
-        other => panic!("Expected SessionReady, got: {:?}", other),
+        other => panic!("Expected SessionReady, got: {other:?}"),
     }
 
     server.shutdown();
