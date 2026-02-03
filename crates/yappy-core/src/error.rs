@@ -5,6 +5,13 @@ use serde::Serialize;
 /// Provider-specific errors (non-fatal by default)
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
+    /// Provider initialization failed (model loading, connection, etc.)
+    #[error("Initialization failed: {message}")]
+    InitializationFailed {
+        /// Error message describing the failure
+        message: String,
+    },
+
     /// Synthesis failed
     #[error("Synthesis failed: {message}")]
     SynthesisFailed {
@@ -62,6 +69,7 @@ impl ProviderError {
     /// Get error code for protocol messages
     pub const fn code(&self) -> &'static str {
         match self {
+            Self::InitializationFailed { .. } => "initialization_failed",
             Self::SynthesisFailed { .. } => "synthesis_failed",
             Self::RateLimited { .. } => "rate_limited",
             Self::Timeout { .. } => "provider_timeout",
