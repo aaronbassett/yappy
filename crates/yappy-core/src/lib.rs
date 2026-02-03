@@ -4,6 +4,7 @@
 //! - `TtsProvider` trait for implementing TTS backends
 //! - Session, audio, and configuration types
 //! - Error types
+//! - WebSocket message types
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
@@ -26,10 +27,14 @@ pub mod config;
 /// Error types
 pub mod error;
 
+/// WebSocket message types
+pub mod message;
+
 // Re-exports for convenience
 pub use audio::{AudioChunk, AudioCodec, AudioFormat};
 pub use buffer::SentenceBuffer;
 pub use config::Config;
-pub use error::{ProviderError, SessionError};
+pub use error::{ErrorResponse, ProviderError, SessionError};
+pub use message::{ClientMessage, ServerMessage};
 pub use provider::{ProviderMetadata, ProviderStatus, TtsProvider};
-pub use session::{Session, SessionId, SessionState};
+pub use session::{CodeBlockMode, Session, SessionId, SessionState, VoiceConfig};

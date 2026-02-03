@@ -63,28 +63,28 @@
 - [x] T017 Create specs/001-streaming-tts-server/retro/P2.md for this phase
 
 ### Core Types (yappy-core)
-- [ ] T018 [GIT] Commit: initialize phase 2 retro
-- [ ] T019 [P] Implement error types (ProviderError, SessionError) in crates/yappy-core/src/error.rs (use devs:rust-dev agent)
-- [ ] T020 [P] Implement AudioCodec, AudioFormat, AudioChunk types in crates/yappy-core/src/audio.rs (use devs:rust-dev agent)
-- [ ] T021 [P] Implement VoiceInfo, VoiceConfig, VoiceGender types in crates/yappy-core/src/voice.rs (use devs:rust-dev agent)
-- [ ] T022 [GIT] Commit: add core audio and voice types
-- [ ] T023 Implement TtsProvider trait and ProviderMetadata in crates/yappy-core/src/provider.rs (use devs:rust-dev agent)
-- [ ] T024 [GIT] Commit: add TtsProvider trait
-- [ ] T025 [P] Implement SessionId, Session, SessionState types in crates/yappy-core/src/session.rs (use devs:rust-dev agent)
-- [ ] T026 [P] Implement CodeBlockMode enum in crates/yappy-core/src/session.rs (use devs:rust-dev agent)
-- [ ] T026a Implement SessionState lifecycle transitions (Init→Streaming→Complete→Cleanup) with state validation in crates/yappy-core/src/session.rs (use devs:rust-dev agent)
-- [ ] T027 [GIT] Commit: add session types
-- [ ] T028 Implement BufferConfig and SentenceBuffer in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
-- [ ] T029 [GIT] Commit: add sentence buffer
-- [ ] T030 [P] Implement Config, ServerConfig, ProvidersConfig in crates/yappy-core/src/config.rs (use devs:rust-dev agent)
-- [ ] T031 [P] Implement environment variable expansion for config secrets in crates/yappy-core/src/config.rs (use devs:rust-dev agent)
-- [ ] T032 [GIT] Commit: add configuration types
-- [ ] T033 Update crates/yappy-core/src/lib.rs to export all public types (use devs:rust-dev agent)
-- [ ] T034 [GIT] Commit: export all yappy-core types
+- [x] T018 [GIT] Commit: initialize phase 2 retro
+- [x] T019 [P] Implement error types (ProviderError, SessionError) in crates/yappy-core/src/error.rs (pre-existing from Phase 1)
+- [x] T020 [P] Implement AudioCodec, AudioFormat, AudioChunk types in crates/yappy-core/src/audio.rs (pre-existing from Phase 1)
+- [x] T021 [P] Implement VoiceInfo, VoiceConfig, VoiceGender types in crates/yappy-core/src/voice.rs (pre-existing in provider.rs/session.rs from Phase 1)
+- [x] T022 [GIT] Commit: add core audio and voice types (pre-existing from Phase 1)
+- [x] T023 Implement TtsProvider trait and ProviderMetadata in crates/yappy-core/src/provider.rs (pre-existing from Phase 1)
+- [x] T024 [GIT] Commit: add TtsProvider trait (pre-existing from Phase 1)
+- [x] T025 [P] Implement SessionId, Session, SessionState types in crates/yappy-core/src/session.rs (pre-existing from Phase 1)
+- [x] T026 [P] Implement CodeBlockMode enum in crates/yappy-core/src/session.rs (pre-existing from Phase 1)
+- [x] T026a Implement SessionState lifecycle transitions (Init→Streaming→Complete→Cleanup) with state validation in crates/yappy-core/src/session.rs (pre-existing from Phase 1)
+- [x] T027 [GIT] Commit: add session types (pre-existing from Phase 1)
+- [x] T028 Implement BufferConfig and SentenceBuffer in crates/yappy-core/src/buffer.rs (pre-existing from Phase 1)
+- [x] T029 [GIT] Commit: add sentence buffer (pre-existing from Phase 1)
+- [x] T030 [P] Implement Config, ServerConfig, ProvidersConfig in crates/yappy-core/src/config.rs (pre-existing from Phase 1)
+- [x] T031 [P] Implement environment variable expansion for config secrets in crates/yappy-core/src/config.rs (pre-existing from Phase 1)
+- [x] T032 [GIT] Commit: add configuration types (pre-existing from Phase 1)
+- [x] T033 Update crates/yappy-core/src/lib.rs to export all public types (pre-existing from Phase 1)
+- [x] T034 [GIT] Commit: export all yappy-core types (pre-existing from Phase 1)
 
 ### WebSocket Message Types (yappy-core)
-- [ ] T035 [P] Implement ClientMessage enum (session.init, text, text.done) in crates/yappy-core/src/message.rs (use devs:rust-dev agent)
-- [ ] T036 [P] Implement ServerMessage enum (session.ready, audio.done, error, session.error) in crates/yappy-core/src/message.rs (use devs:rust-dev agent)
+- [x] T035 [P] Implement ClientMessage enum (session.init, text, text.done) in crates/yappy-core/src/message.rs (use devs:rust-dev agent)
+- [x] T036 [P] Implement ServerMessage enum (session.ready, audio.done, error, session.error) in crates/yappy-core/src/message.rs (use devs:rust-dev agent)
 - [ ] T037 [GIT] Commit: add WebSocket message types
 
 ### Server Infrastructure (yappy-server)
