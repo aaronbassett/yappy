@@ -30,24 +30,24 @@
 **Purpose**: Verify project structure and initialize development environment
 
 ### Git Start
-- [ ] T001 [GIT] Verify on feature branch 001-streaming-tts-server and working tree is clean
-- [ ] T002 [GIT] Pull and rebase on origin/main if needed
+- [x] T001 [GIT] Verify on feature branch 001-streaming-tts-server and working tree is clean
+- [x] T002 [GIT] Pull and rebase on origin/main if needed
 
 ### Implementation
-- [ ] T003 Verify project structure matches plan.md (crates/, tests/, .github/) (use devs:rust-dev agent)
-- [ ] T004 [GIT] Commit: verify project structure
-- [ ] T005 [P] Verify Cargo.toml workspace configuration and dependencies (use devs:rust-dev agent)
-- [ ] T006 [P] Verify lefthook.yml pre-commit hooks configuration
-- [ ] T007 [P] Verify justfile development tasks
-- [ ] T008 [GIT] Commit: verify development tooling
-- [ ] T009 Verify .github/workflows/ci.yml and release.yml exist (use devs:rust-dev agent)
-- [ ] T010 [GIT] Commit: verify CI workflows
+- [x] T003 Verify project structure matches plan.md (crates/, tests/, .github/) (use devs:rust-dev agent)
+- [x] T004 [GIT] Commit: verify project structure
+- [x] T005 [P] Verify Cargo.toml workspace configuration and dependencies (use devs:rust-dev agent)
+- [x] T006 [P] Verify lefthook.yml pre-commit hooks configuration
+- [x] T007 [P] Verify justfile development tasks
+- [x] T008 [GIT] Commit: verify development tooling
+- [x] T009 Verify .github/workflows/ci.yml and release.yml exist (use devs:rust-dev agent)
+- [x] T010 [GIT] Commit: verify CI workflows
 
 ### Phase Completion
-- [ ] T011 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T012 [GIT] Create/update PR to main with phase summary
-- [ ] T013 [GIT] Verify all CI checks pass
-- [ ] T014 [GIT] Report PR ready status
+- [x] T011 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [x] T012 [GIT] Create/update PR to main with phase summary
+- [x] T013 [GIT] Verify all CI checks pass
+- [x] T014 [GIT] Report PR ready status
 
 ---
 
