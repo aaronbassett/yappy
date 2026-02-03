@@ -187,6 +187,7 @@ where
 /// # Returns
 ///
 /// Returns `true` to continue the message loop, `false` on fatal errors.
+#[allow(clippy::too_many_lines)]
 async fn handle_text_message<S>(
     text: &str,
     sender: &mut S,
@@ -274,7 +275,7 @@ where
                     debug!(message_type = "text.done", "Received client message");
 
                     // Check if session is initialized
-                    if session.is_none() {
+                    let Some(session) = session.as_mut() else {
                         let response = ServerMessage::error(
                             "no_session",
                             "No active session - send session.init first",
@@ -283,17 +284,45 @@ where
                             warn!("Failed to send response: {}", err);
                             return false;
                         }
-                    } else {
-                        // text.done handling will be implemented in a later task
-                        let response = ServerMessage::error(
-                            "not_implemented",
-                            "text.done processing not yet implemented",
+                        return true;
+                    };
+
+                    // Transition to Completing state
+                    session.state = SessionState::Completing;
+                    debug!(
+                        session_id = %session.id,
+                        "Session transitioned to Completing state"
+                    );
+
+                    // Flush remaining buffer content
+                    if let Some(_sentence) = session.buffer.flush() {
+                        // Log that we flushed remaining content (but not the content itself - privacy)
+                        debug!(
+                            session_id = %session.id,
+                            "Flushed remaining buffer content"
                         );
-                        if let Err(err) = send_server_message(sender, &response).await {
-                            warn!("Failed to send response: {}", err);
-                            return false;
-                        }
+                        // Actual synthesis will come in a later task
                     }
+
+                    // Get the total sentence count (includes any flushed sentence)
+                    let total_sentences = session.buffer.sentence_index();
+
+                    // Send audio.done with statistics
+                    // Note: duration and bytes are 0 for now - actual values come with audio streaming
+                    let response = ServerMessage::audio_done(total_sentences, 0, 0);
+                    if let Err(err) = send_server_message(sender, &response).await {
+                        warn!("Failed to send audio.done: {}", err);
+                        return false;
+                    }
+
+                    // Transition to Closed state
+                    session.state = SessionState::Closed;
+                    debug!(
+                        session_id = %session.id,
+                        total_sentences = total_sentences,
+                        "Session completed and closed"
+                    );
+
                     true
                 }
             }
@@ -1149,5 +1178,171 @@ mod tests {
 
         // No responses expected
         assert!(sink.messages.is_empty());
+    }
+
+    // ==================== Text Done Tests ====================
+
+    #[tokio::test]
+    async fn test_text_done_sends_audio_done() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry();
+
+        // Initialize session
+        let init_text = r#"{"type":"session.init"}"#;
+        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        sink.messages.clear();
+
+        // Send text.done
+        let done_text = r#"{"type":"text.done"}"#;
+        let should_continue =
+            handle_text_message(done_text, &mut sink, &mut session, &registry).await;
+
+        assert!(should_continue);
+        assert_eq!(sink.messages.len(), 1);
+
+        // Verify audio.done response
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::AudioDone {
+                    total_sentences,
+                    total_duration_ms,
+                    total_bytes,
+                } => {
+                    assert_eq!(total_sentences, 0); // No sentences sent
+                    assert_eq!(total_duration_ms, 0);
+                    assert_eq!(total_bytes, 0);
+                }
+                _ => panic!("Expected AudioDone, got {:?}", msg),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+
+        // Session should be in Closed state
+        assert_eq!(session.as_ref().unwrap().state, SessionState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_text_done_flushes_buffer_and_counts_sentences() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry();
+
+        // Initialize session
+        let init_text = r#"{"type":"session.init"}"#;
+        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        sink.messages.clear();
+
+        // Send text with complete sentences and an incomplete one
+        let text_msg = r#"{"type":"text","content":"First sentence. Second sentence. Incomplete"}"#;
+        handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+
+        // Buffer should have the incomplete text
+        assert_eq!(
+            session.as_ref().unwrap().buffer.current_buffer(),
+            "Incomplete"
+        );
+
+        sink.messages.clear();
+
+        // Send text.done - should flush the incomplete text
+        let done_text = r#"{"type":"text.done"}"#;
+        let should_continue =
+            handle_text_message(done_text, &mut sink, &mut session, &registry).await;
+
+        assert!(should_continue);
+        assert_eq!(sink.messages.len(), 1);
+
+        // Verify audio.done response has correct sentence count
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::AudioDone {
+                    total_sentences, ..
+                } => {
+                    // 2 complete sentences + 1 flushed incomplete = 3 total
+                    assert_eq!(total_sentences, 3);
+                }
+                _ => panic!("Expected AudioDone, got {:?}", msg),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+
+        // Buffer should be empty after flush
+        assert!(session.as_ref().unwrap().buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_text_done_state_transitions() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry();
+
+        // Initialize session
+        let init_text = r#"{"type":"session.init"}"#;
+        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        assert_eq!(session.as_ref().unwrap().state, SessionState::Ready);
+
+        // Send text - transitions to Streaming
+        let text_msg = r#"{"type":"text","content":"Hello. "}"#;
+        handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
+
+        sink.messages.clear();
+
+        // Send text.done - transitions to Closed (through Completing)
+        let done_text = r#"{"type":"text.done"}"#;
+        handle_text_message(done_text, &mut sink, &mut session, &registry).await;
+
+        // Final state should be Closed
+        assert_eq!(session.as_ref().unwrap().state, SessionState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_full_session_flow_init_text_done() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry();
+
+        // Initialize session
+        let init_text = r#"{"type":"session.init"}"#;
+        let should_continue =
+            handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        assert!(should_continue);
+        assert!(session.is_some());
+        sink.messages.clear();
+
+        // Send text with sentences
+        let text_msg = r#"{"type":"text","content":"Hello world. Goodbye world."}"#;
+        let should_continue =
+            handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+        assert!(should_continue);
+        assert!(sink.messages.is_empty());
+
+        // Send text.done
+        let done_text = r#"{"type":"text.done"}"#;
+        let should_continue =
+            handle_text_message(done_text, &mut sink, &mut session, &registry).await;
+        assert!(should_continue);
+
+        // Verify audio.done was sent
+        assert_eq!(sink.messages.len(), 1);
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::AudioDone {
+                    total_sentences, ..
+                } => {
+                    assert_eq!(total_sentences, 2);
+                }
+                _ => panic!("Expected AudioDone, got {:?}", msg),
+            }
+        }
+
+        // Session is closed
+        assert_eq!(session.as_ref().unwrap().state, SessionState::Closed);
     }
 }

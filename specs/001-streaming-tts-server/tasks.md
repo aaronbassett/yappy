@@ -134,8 +134,8 @@
 - [x] T062 [US1] Implement session.init message handling in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [x] T063 [GIT] Commit: add session.init handling
 - [x] T064 [US1] Implement text message handling with sentence buffer integration in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T065 [GIT] Commit: add text message handling
-- [ ] T066 [US1] Implement text.done handling and buffer flush in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T065 [GIT] Commit: add text message handling
+- [x] T066 [US1] Implement text.done handling and buffer flush in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T067 [GIT] Commit: add text.done handling
 
 ### Audio Streaming

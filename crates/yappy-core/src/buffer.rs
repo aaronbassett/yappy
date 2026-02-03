@@ -140,6 +140,11 @@ impl SentenceBuffer {
         self.buffer.is_empty()
     }
 
+    /// Get the current sentence index (total sentences emitted so far)
+    pub const fn sentence_index(&self) -> u32 {
+        self.sentence_index
+    }
+
     /// Find the next sentence boundary in the buffer
     fn find_sentence_boundary(&self) -> Option<usize> {
         // Common abbreviations to skip
