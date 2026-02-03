@@ -400,15 +400,18 @@ where
 /// 1. Checks if a session already exists (error if so)
 /// 2. Resolves the provider (specified or default)
 /// 3. Validates provider availability via health check
-/// 4. Resolves voice configuration
-/// 5. Resolves audio format
-/// 6. Creates the session and sends session.ready
+/// 4. Validates voice ID exists in provider's voice list
+/// 5. Validates voice parameters (speed, pitch, volume)
+/// 6. Resolves audio format
+/// 7. Creates the session and sends session.ready
 ///
 /// # Error Handling
 ///
 /// - `session_already_initialized`: If session already exists
 /// - `no_providers`: If no providers are registered
 /// - `provider_unavailable`: If specified/default provider is not available
+/// - `invalid_voice`: If the specified voice ID is not available for the provider
+/// - `invalid_voice_config`: If voice parameters are out of valid range
 ///
 /// # Returns
 ///
@@ -461,11 +464,45 @@ where
         return false; // Error already sent
     };
 
-    // Get provider metadata for defaults
+    // Get provider metadata for defaults and validation
     let metadata = provider.metadata();
 
-    // Resolve voice configuration
-    let voice = requested_voice.unwrap_or_else(|| {
+    // Collect available voice IDs for validation
+    let available_voice_ids: Vec<String> = metadata.voices.iter().map(|v| v.id.clone()).collect();
+
+    // Resolve voice configuration (use default if not specified)
+    let voice = if let Some(requested) = requested_voice {
+        // Validate voice ID exists in provider's voice list
+        if !available_voice_ids.is_empty() && !available_voice_ids.contains(&requested.id) {
+            let response = ServerMessage::session_error_with_alternatives(
+                "invalid_voice",
+                format!(
+                    "Voice '{}' is not available for provider '{}'",
+                    requested.id, provider_id
+                ),
+                available_voice_ids,
+            );
+            if let Err(err) = send_server_message(sender, &response).await {
+                warn!("Failed to send response: {err}");
+            }
+            return false;
+        }
+
+        // Validate voice parameters (speed, pitch, volume)
+        if let Err(validation_error) = requested.validate() {
+            let response = ServerMessage::session_error(
+                "invalid_voice_config",
+                format!("Invalid voice configuration: {validation_error}"),
+            );
+            if let Err(err) = send_server_message(sender, &response).await {
+                warn!("Failed to send response: {err}");
+            }
+            return false;
+        }
+
+        requested
+    } else {
+        // Use default voice if available
         let default_voice_id = metadata
             .voices
             .first()
@@ -475,7 +512,7 @@ where
             id: default_voice_id,
             ..Default::default()
         }
-    });
+    };
 
     // Resolve audio format
     let audio_format = requested_format.unwrap_or_else(|| {
@@ -945,6 +982,11 @@ mod tests {
                 synthesis_mode: MockSynthesisMode::default(),
             }
         }
+
+        fn with_voices(mut self, voices: Vec<VoiceInfo>) -> Self {
+            self.voices = voices;
+            self
+        }
     }
 
     #[async_trait]
@@ -1034,6 +1076,37 @@ mod tests {
         ProviderRegistry::new()
     }
 
+    /// Helper to create a provider registry with multiple voices for voice validation tests
+    fn create_test_registry_with_voices() -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        let voices = vec![
+            VoiceInfo {
+                id: "voice_alice".to_string(),
+                name: "Alice".to_string(),
+                language: "en-US".to_string(),
+                gender: None,
+                sample_url: None,
+            },
+            VoiceInfo {
+                id: "voice_bob".to_string(),
+                name: "Bob".to_string(),
+                language: "en-US".to_string(),
+                gender: None,
+                sample_url: None,
+            },
+            VoiceInfo {
+                id: "voice_carol".to_string(),
+                name: "Carol".to_string(),
+                language: "en-GB".to_string(),
+                gender: None,
+                sample_url: None,
+            },
+        ];
+        registry.register(MockProvider::new("test", "Test Provider").with_voices(voices));
+        registry.set_default(ProviderId::new("test"));
+        registry
+    }
+
     // ==================== Session Init Tests ====================
 
     #[tokio::test]
@@ -1084,18 +1157,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_init_success_with_custom_voice() {
+    async fn test_session_init_success_with_valid_voice() {
         let mut sink = MockSink::new();
         let mut session = None;
-        let registry = create_test_registry();
-        let text = r#"{"type":"session.init","voice":{"id":"custom_voice","speed":1.5}}"#;
+        let registry = create_test_registry_with_voices();
+        let text = r#"{"type":"session.init","voice":{"id":"voice_alice","speed":1.5}}"#;
 
         let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
 
         assert!(should_continue);
         assert!(session.is_some());
-        assert_eq!(session.as_ref().unwrap().voice.id, "custom_voice");
+        assert_eq!(session.as_ref().unwrap().voice.id, "voice_alice");
         assert!((session.as_ref().unwrap().voice.speed - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn test_session_init_success_with_voice_parameters_at_bounds() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_voices();
+        // Test with voice parameters at valid boundary values
+        let text = r#"{"type":"session.init","voice":{"id":"voice_bob","speed":2.0,"pitch":1.0,"volume":0.0}}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        assert!(should_continue);
+        assert!(session.is_some());
+        let voice = &session.as_ref().unwrap().voice;
+        assert_eq!(voice.id, "voice_bob");
+        assert!((voice.speed - 2.0).abs() < f32::EPSILON);
+        assert!((voice.pitch - 1.0).abs() < f32::EPSILON);
+        assert!(voice.volume.abs() < f32::EPSILON);
     }
 
     #[tokio::test]
@@ -1225,6 +1317,273 @@ mod tests {
                     assert_eq!(code, "session_already_initialized");
                 }
                 _ => panic!("Expected Error, got {msg:?}"),
+            }
+        }
+    }
+
+    // ==================== Voice Validation Tests ====================
+
+    #[tokio::test]
+    async fn test_session_init_error_invalid_voice() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_voices();
+        let text = r#"{"type":"session.init","voice":{"id":"nonexistent_voice"}}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        // Should return false (fatal error)
+        assert!(!should_continue);
+        assert!(session.is_none());
+        assert_eq!(sink.messages.len(), 1);
+
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::SessionError {
+                    code,
+                    message,
+                    alternatives,
+                } => {
+                    assert_eq!(code, "invalid_voice");
+                    assert!(message.contains("nonexistent_voice"));
+                    assert!(message.contains("not available"));
+                    // Should include available voices as alternatives
+                    let alts = alternatives.expect("alternatives should be present");
+                    assert!(alts.contains(&"voice_alice".to_string()));
+                    assert!(alts.contains(&"voice_bob".to_string()));
+                    assert!(alts.contains(&"voice_carol".to_string()));
+                }
+                _ => panic!("Expected SessionError, got {msg:?}"),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_init_error_invalid_voice_speed_too_low() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_voices();
+        // Speed below valid range (0.5 - 2.0)
+        let text = r#"{"type":"session.init","voice":{"id":"voice_alice","speed":0.3}}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        // Should return false (fatal error)
+        assert!(!should_continue);
+        assert!(session.is_none());
+        assert_eq!(sink.messages.len(), 1);
+
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::SessionError { code, message, .. } => {
+                    assert_eq!(code, "invalid_voice_config");
+                    assert!(message.contains("speed"));
+                }
+                _ => panic!("Expected SessionError, got {msg:?}"),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_init_error_invalid_voice_speed_too_high() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_voices();
+        // Speed above valid range (0.5 - 2.0)
+        let text = r#"{"type":"session.init","voice":{"id":"voice_alice","speed":3.0}}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        // Should return false (fatal error)
+        assert!(!should_continue);
+        assert!(session.is_none());
+        assert_eq!(sink.messages.len(), 1);
+
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::SessionError { code, message, .. } => {
+                    assert_eq!(code, "invalid_voice_config");
+                    assert!(message.contains("speed"));
+                }
+                _ => panic!("Expected SessionError, got {msg:?}"),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_init_error_invalid_voice_pitch_out_of_range() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_voices();
+        // Pitch outside valid range (-1.0 to 1.0)
+        let text = r#"{"type":"session.init","voice":{"id":"voice_alice","pitch":1.5}}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        // Should return false (fatal error)
+        assert!(!should_continue);
+        assert!(session.is_none());
+        assert_eq!(sink.messages.len(), 1);
+
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::SessionError { code, message, .. } => {
+                    assert_eq!(code, "invalid_voice_config");
+                    assert!(message.contains("pitch"));
+                }
+                _ => panic!("Expected SessionError, got {msg:?}"),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_init_error_invalid_voice_volume_out_of_range() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_voices();
+        // Volume outside valid range (0.0 to 1.0)
+        let text = r#"{"type":"session.init","voice":{"id":"voice_alice","volume":1.5}}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        // Should return false (fatal error)
+        assert!(!should_continue);
+        assert!(session.is_none());
+        assert_eq!(sink.messages.len(), 1);
+
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::SessionError { code, message, .. } => {
+                    assert_eq!(code, "invalid_voice_config");
+                    assert!(message.contains("volume"));
+                }
+                _ => panic!("Expected SessionError, got {msg:?}"),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_init_error_invalid_voice_negative_volume() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_voices();
+        // Negative volume is invalid
+        let text = r#"{"type":"session.init","voice":{"id":"voice_alice","volume":-0.5}}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        // Should return false (fatal error)
+        assert!(!should_continue);
+        assert!(session.is_none());
+        assert_eq!(sink.messages.len(), 1);
+
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::SessionError { code, message, .. } => {
+                    assert_eq!(code, "invalid_voice_config");
+                    assert!(message.contains("volume"));
+                }
+                _ => panic!("Expected SessionError, got {msg:?}"),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_init_uses_first_voice_as_default() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_voices();
+        // No voice specified - should use first voice
+        let text = r#"{"type":"session.init"}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        assert!(should_continue);
+        assert!(session.is_some());
+        // Should use the first voice as default
+        assert_eq!(session.as_ref().unwrap().voice.id, "voice_alice");
+
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::SessionReady { voice, .. } => {
+                    assert_eq!(voice, "voice_alice");
+                }
+                _ => panic!("Expected SessionReady, got {msg:?}"),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_init_voice_validation_uses_correct_provider() {
+        // Test that voice validation uses the provider's voice list, not a global list
+        let mut sink = MockSink::new();
+        let mut session = None;
+
+        // Create a registry with two providers having different voice lists
+        let mut registry = ProviderRegistry::new();
+        let provider1_voices = vec![VoiceInfo {
+            id: "provider1_voice".to_string(),
+            name: "Provider 1 Voice".to_string(),
+            language: "en-US".to_string(),
+            gender: None,
+            sample_url: None,
+        }];
+        let provider2_voices = vec![VoiceInfo {
+            id: "provider2_voice".to_string(),
+            name: "Provider 2 Voice".to_string(),
+            language: "en-US".to_string(),
+            gender: None,
+            sample_url: None,
+        }];
+        registry
+            .register(MockProvider::new("provider1", "Provider 1").with_voices(provider1_voices));
+        registry
+            .register(MockProvider::new("provider2", "Provider 2").with_voices(provider2_voices));
+        registry.set_default(ProviderId::new("provider1"));
+
+        // Try to use provider1's voice with provider2 - should fail
+        let text =
+            r#"{"type":"session.init","provider":"provider2","voice":{"id":"provider1_voice"}}"#;
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        // Should return false (fatal error)
+        assert!(!should_continue);
+        assert!(session.is_none());
+
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::SessionError {
+                    code, alternatives, ..
+                } => {
+                    assert_eq!(code, "invalid_voice");
+                    // Should include provider2's voices as alternatives
+                    let alts = alternatives.expect("alternatives should be present");
+                    assert!(alts.contains(&"provider2_voice".to_string()));
+                    assert!(!alts.contains(&"provider1_voice".to_string()));
+                }
+                _ => panic!("Expected SessionError, got {msg:?}"),
             }
         }
     }

@@ -365,7 +365,9 @@ async fn test_websocket_session_init_with_provider() {
     ws.close(None).await.ok();
 }
 
-/// Test session initialization with custom voice.
+/// Test session initialization with custom voice parameters.
+///
+/// Uses the provider's existing voice with custom speed parameter.
 #[tokio::test]
 async fn test_websocket_session_init_with_custom_voice() {
     let registry = create_mock_registry();
@@ -373,11 +375,12 @@ async fn test_websocket_session_init_with_custom_voice() {
 
     let mut ws = connect_ws(addr).await;
 
-    // Send session.init with custom voice
+    // Send session.init with the provider's voice and custom speed
+    // The mock provider has "test_voice" as its only voice
     let init_msg = ClientMessage::SessionInit {
         provider: None,
         voice: Some(VoiceConfig {
-            id: "custom_voice".to_string(),
+            id: "test_voice".to_string(),
             speed: 1.5,
             pitch: 0.0,
             volume: 1.0,
@@ -401,9 +404,112 @@ async fn test_websocket_session_init_with_custom_voice() {
         let server_msg: ServerMessage = serde_json::from_str(&text).unwrap();
         match server_msg {
             ServerMessage::SessionReady { voice, .. } => {
-                assert_eq!(voice, "custom_voice");
+                assert_eq!(voice, "test_voice");
             }
-            _ => panic!("Expected SessionReady"),
+            _ => panic!("Expected SessionReady, got: {server_msg:?}"),
+        }
+    } else {
+        panic!("Expected text message");
+    }
+
+    ws.close(None).await.ok();
+}
+
+/// Test session initialization with invalid voice returns error.
+#[tokio::test]
+async fn test_websocket_session_init_with_invalid_voice() {
+    let registry = create_mock_registry();
+    let (addr, _handle) = start_test_server(registry).await;
+
+    let mut ws = connect_ws(addr).await;
+
+    // Send session.init with a voice that doesn't exist in the provider
+    let init_msg = ClientMessage::SessionInit {
+        provider: None,
+        voice: Some(VoiceConfig {
+            id: "nonexistent_voice".to_string(),
+            speed: 1.0,
+            pitch: 0.0,
+            volume: 1.0,
+        }),
+        audio_format: None,
+        code_block_mode: None,
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&init_msg).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+
+    let response = timeout(TEST_TIMEOUT, ws.next())
+        .await
+        .expect("Timeout")
+        .expect("Stream closed")
+        .expect("WebSocket error");
+
+    if let Message::Text(text) = response {
+        let server_msg: ServerMessage = serde_json::from_str(&text).unwrap();
+        match server_msg {
+            ServerMessage::SessionError {
+                code,
+                message,
+                alternatives,
+            } => {
+                assert_eq!(code, "invalid_voice");
+                assert!(message.contains("nonexistent_voice"));
+                // Should include the provider's available voice as alternative
+                let alts = alternatives.expect("alternatives should be present");
+                assert!(alts.contains(&"test_voice".to_string()));
+            }
+            _ => panic!("Expected SessionError, got: {server_msg:?}"),
+        }
+    } else {
+        panic!("Expected text message");
+    }
+
+    ws.close(None).await.ok();
+}
+
+/// Test session initialization with invalid voice parameters returns error.
+#[tokio::test]
+async fn test_websocket_session_init_with_invalid_voice_params() {
+    let registry = create_mock_registry();
+    let (addr, _handle) = start_test_server(registry).await;
+
+    let mut ws = connect_ws(addr).await;
+
+    // Send session.init with an invalid speed value
+    let init_msg = ClientMessage::SessionInit {
+        provider: None,
+        voice: Some(VoiceConfig {
+            id: "test_voice".to_string(),
+            speed: 5.0, // Invalid: must be between 0.5 and 2.0
+            pitch: 0.0,
+            volume: 1.0,
+        }),
+        audio_format: None,
+        code_block_mode: None,
+    };
+    ws.send(Message::Text(
+        serde_json::to_string(&init_msg).unwrap().into(),
+    ))
+    .await
+    .unwrap();
+
+    let response = timeout(TEST_TIMEOUT, ws.next())
+        .await
+        .expect("Timeout")
+        .expect("Stream closed")
+        .expect("WebSocket error");
+
+    if let Message::Text(text) = response {
+        let server_msg: ServerMessage = serde_json::from_str(&text).unwrap();
+        match server_msg {
+            ServerMessage::SessionError { code, message, .. } => {
+                assert_eq!(code, "invalid_voice_config");
+                assert!(message.contains("speed"));
+            }
+            _ => panic!("Expected SessionError, got: {server_msg:?}"),
         }
     } else {
         panic!("Expected text message");
