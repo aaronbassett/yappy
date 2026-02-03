@@ -412,9 +412,9 @@
 - [x] T212 [GIT] Commit: add flush timeout
 - [x] T213 [US7] Implement max buffer overflow with clause/word boundary split in crates/yappy-core/src/buffer.rs (pre-existing in force_flush())
 - [x] T214 [GIT] Commit: add buffer overflow handling (committed in T212)
-- [ ] T215 [US7] Implement code block detection and handling (skip, read_literally modes) in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
-- [ ] T215a [US7] Implement announce-and-skip code block mode with synthetic "code block" text emission in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
-- [ ] T216 [GIT] Commit: add code block handling
+- [x] T215 [US7] Implement code block detection and handling (skip, read_literally modes) in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
+- [x] T215a [US7] Implement announce-and-skip code block mode with synthetic "code block" text emission in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)
+- [x] T216 [GIT] Commit: add code block handling
 
 ### Integration Test
 - [ ] T217 [US7] Create sentence buffer integration test in tests/integration/ws_buffer.rs (use devs:rust-dev agent)
