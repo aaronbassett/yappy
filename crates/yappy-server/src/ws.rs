@@ -28,10 +28,13 @@ use axum::{
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
+use yappy_core::buffer::Sentence;
 use yappy_core::provider::ProviderId;
 use yappy_core::{
-    AudioFormat, ClientMessage, CodeBlockMode, ServerMessage, Session, SessionState, VoiceConfig,
+    AudioFormat, ClientMessage, CodeBlockMode, ServerMessage, Session, SessionState, TtsProvider,
+    VoiceConfig,
 };
 
 use crate::state::{AppState, ProviderRegistry};
@@ -264,10 +267,33 @@ where
                             sentence_count = sentences.len(),
                             "Extracted sentences from buffer"
                         );
-                    }
 
-                    // Sentences are extracted but not processed yet - synthesis comes later
-                    // No response is sent for successful text processing
+                        // Get the provider for synthesis
+                        if let Some(provider) = providers.get(&session.provider_id) {
+                            // Synthesize sentences and stream audio to WebSocket
+                            if !synthesize_and_stream(sentences, session, sender, provider.as_ref())
+                                .await
+                            {
+                                // Fatal error during synthesis/streaming
+                                return false;
+                            }
+                        } else {
+                            // Provider disappeared - this shouldn't happen but handle gracefully
+                            warn!(
+                                session_id = %session.id,
+                                provider_id = %session.provider_id,
+                                "Provider not found during synthesis"
+                            );
+                            let response = ServerMessage::error(
+                                "provider_gone",
+                                "TTS provider is no longer available",
+                            );
+                            if let Err(err) = send_server_message(sender, &response).await {
+                                warn!("Failed to send error: {}", err);
+                                return false;
+                            }
+                        }
+                    }
 
                     true
                 }
@@ -294,22 +320,46 @@ where
                         "Session transitioned to Completing state"
                     );
 
-                    // Flush remaining buffer content
-                    if let Some(_sentence) = session.buffer.flush() {
+                    // Flush remaining buffer content and synthesize if any
+                    if let Some(sentence) = session.buffer.flush() {
                         // Log that we flushed remaining content (but not the content itself - privacy)
                         debug!(
                             session_id = %session.id,
+                            sentence_index = sentence.index,
                             "Flushed remaining buffer content"
                         );
-                        // Actual synthesis will come in a later task
+
+                        // Synthesize the flushed sentence
+                        if let Some(provider) = providers.get(&session.provider_id) {
+                            if !synthesize_and_stream(
+                                vec![sentence],
+                                session,
+                                sender,
+                                provider.as_ref(),
+                            )
+                            .await
+                            {
+                                // Fatal error during synthesis
+                                return false;
+                            }
+                        } else {
+                            warn!(
+                                session_id = %session.id,
+                                provider_id = %session.provider_id,
+                                "Provider not found during flush synthesis"
+                            );
+                        }
                     }
 
                     // Get the total sentence count (includes any flushed sentence)
                     let total_sentences = session.buffer.sentence_index();
 
-                    // Send audio.done with statistics
-                    // Note: duration and bytes are 0 for now - actual values come with audio streaming
-                    let response = ServerMessage::audio_done(total_sentences, 0, 0);
+                    // Send audio.done with accumulated statistics
+                    let response = ServerMessage::audio_done(
+                        total_sentences,
+                        session.total_duration_ms,
+                        session.total_bytes,
+                    );
                     if let Err(err) = send_server_message(sender, &response).await {
                         warn!("Failed to send audio.done: {}", err);
                         return false;
@@ -320,6 +370,8 @@ where
                     debug!(
                         session_id = %session.id,
                         total_sentences = total_sentences,
+                        total_duration_ms = session.total_duration_ms,
+                        total_bytes = session.total_bytes,
                         "Session completed and closed"
                     );
 
@@ -548,6 +600,144 @@ where
     Some((provider_id, provider))
 }
 
+/// Synthesize sentences and stream audio chunks to the WebSocket.
+///
+/// For each sentence:
+/// 1. Calls the provider's `synthesize()` method to get an audio stream
+/// 2. Streams each `AudioChunk` as a binary WebSocket frame
+/// 3. Updates session statistics (duration, bytes, sequence)
+/// 4. On error, sends a non-fatal error message with the sentence index
+///
+/// # Arguments
+///
+/// * `sentences` - Sentences to synthesize (extracted from the buffer)
+/// * `session` - Mutable reference to update statistics
+/// * `sender` - WebSocket sender for streaming audio frames
+/// * `provider` - The TTS provider to use for synthesis
+///
+/// # Returns
+///
+/// Returns `true` if all sentences were processed (even if some had errors),
+/// `false` if a fatal error occurred (e.g., send failure).
+///
+/// # Privacy
+///
+/// Sentence text is never logged. Only metadata like sentence index and
+/// chunk sizes are recorded for observability.
+async fn synthesize_and_stream<S>(
+    sentences: Vec<Sentence>,
+    session: &mut Session,
+    sender: &mut S,
+    provider: &dyn TtsProvider,
+) -> bool
+where
+    S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    for sentence in sentences {
+        debug!(
+            session_id = %session.id,
+            sentence_index = sentence.index,
+            "Starting synthesis for sentence"
+        );
+
+        // Create a cancellation token for this synthesis operation
+        // TODO: In the future, wire this to client disconnection or explicit cancel
+        let cancel_token = CancellationToken::new();
+
+        // Call the provider to synthesize audio
+        let audio_stream = match provider
+            .synthesize(
+                &sentence.text,
+                &session.voice,
+                session.audio_format.clone(),
+                cancel_token,
+            )
+            .await
+        {
+            Ok(stream) => stream,
+            Err(err) => {
+                // Non-fatal error: send error message with sentence index
+                warn!(
+                    session_id = %session.id,
+                    sentence_index = sentence.index,
+                    error_code = err.code(),
+                    "Synthesis failed for sentence"
+                );
+
+                let response =
+                    ServerMessage::error_with_sentence(err.code(), err.to_string(), sentence.index);
+                if let Err(send_err) = send_server_message(sender, &response).await {
+                    warn!("Failed to send synthesis error: {}", send_err);
+                    return false;
+                }
+                // Continue with next sentence
+                continue;
+            }
+        };
+
+        // Stream audio chunks to WebSocket
+        let mut audio_stream = audio_stream;
+        while let Some(chunk_result) = audio_stream.next().await {
+            match chunk_result {
+                Ok(mut chunk) => {
+                    // Assign global sequence number from session
+                    chunk.sequence =
+                        session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
+
+                    // Ensure sentence_index matches our tracked sentence
+                    chunk.sentence_index = sentence.index;
+
+                    debug!(
+                        session_id = %session.id,
+                        sequence = chunk.sequence,
+                        sentence_index = chunk.sentence_index,
+                        bytes = chunk.data.len(),
+                        duration_ms = chunk.duration_ms,
+                        "Sending audio chunk"
+                    );
+
+                    // Serialize chunk to binary frame and send
+                    let frame = chunk.to_binary_frame();
+                    if let Err(err) = sender.send(Message::Binary(frame.to_vec().into())).await {
+                        warn!("Failed to send audio chunk: {}", err);
+                        return false;
+                    }
+                }
+                Err(err) => {
+                    // Stream error: send non-fatal error with sentence index
+                    warn!(
+                        session_id = %session.id,
+                        sentence_index = sentence.index,
+                        error_code = err.code(),
+                        "Audio stream error for sentence"
+                    );
+
+                    let response = ServerMessage::error_with_sentence(
+                        err.code(),
+                        err.to_string(),
+                        sentence.index,
+                    );
+                    if let Err(send_err) = send_server_message(sender, &response).await {
+                        warn!("Failed to send stream error: {}", send_err);
+                        return false;
+                    }
+                    // Break out of chunk streaming, continue to next sentence
+                    break;
+                }
+            }
+        }
+
+        debug!(
+            session_id = %session.id,
+            sentence_index = sentence.index,
+            "Completed synthesis for sentence"
+        );
+    }
+
+    true
+}
+
 /// Handle a binary WebSocket frame.
 ///
 /// Binary frames from clients are not expected in the current protocol
@@ -605,11 +795,13 @@ where
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use futures_util::stream;
     use std::pin::Pin;
     use std::task::{Context, Poll};
+    use tokio_util::bytes::Bytes;
     use tokio_util::sync::CancellationToken;
     use yappy_core::{
-        audio::AudioStream,
+        audio::{AudioChunk, AudioStream},
         error::ProviderError,
         provider::{ProviderMetadata, VoiceInfo},
         ProviderStatus, TtsProvider,
@@ -625,6 +817,28 @@ mod tests {
             Self {
                 messages: Vec::new(),
             }
+        }
+
+        /// Extract text messages from the sink
+        fn text_messages(&self) -> Vec<&str> {
+            self.messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::Text(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Extract binary messages from the sink
+        fn binary_messages(&self) -> Vec<&[u8]> {
+            self.messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::Binary(b) => Some(b.as_ref()),
+                    _ => None,
+                })
+                .collect()
         }
     }
 
@@ -658,12 +872,41 @@ mod tests {
         }
     }
 
+    /// Mock TTS provider behavior configuration
+    #[derive(Clone)]
+    enum MockSynthesisMode {
+        /// Return a simple audio stream with one chunk per sentence
+        Success {
+            /// Duration in ms for each chunk
+            chunk_duration_ms: u32,
+            /// Bytes of audio data per chunk
+            chunk_bytes: usize,
+        },
+        /// Return an error during synthesis initialization
+        FailInit { error: String },
+        /// Return an error mid-stream (after yielding some chunks)
+        FailMidStream {
+            chunks_before_error: usize,
+            error: String,
+        },
+    }
+
+    impl Default for MockSynthesisMode {
+        fn default() -> Self {
+            Self::Success {
+                chunk_duration_ms: 100,
+                chunk_bytes: 256,
+            }
+        }
+    }
+
     /// Mock TTS provider for testing
     struct MockProvider {
         id: String,
         name: String,
         status: ProviderStatus,
         voices: Vec<VoiceInfo>,
+        synthesis_mode: MockSynthesisMode,
     }
 
     impl MockProvider {
@@ -679,7 +922,13 @@ mod tests {
                     gender: None,
                     sample_url: None,
                 }],
+                synthesis_mode: MockSynthesisMode::default(),
             }
+        }
+
+        fn with_synthesis_mode(mut self, mode: MockSynthesisMode) -> Self {
+            self.synthesis_mode = mode;
+            self
         }
 
         fn unavailable(id: &str, name: &str, reason: &str) -> Self {
@@ -690,6 +939,7 @@ mod tests {
                     reason: reason.to_string(),
                 },
                 voices: vec![],
+                synthesis_mode: MockSynthesisMode::default(),
             }
         }
     }
@@ -718,14 +968,59 @@ mod tests {
             _format: AudioFormat,
             _cancel: CancellationToken,
         ) -> Result<AudioStream, ProviderError> {
-            unimplemented!("Mock provider does not synthesize")
+            match &self.synthesis_mode {
+                MockSynthesisMode::Success {
+                    chunk_duration_ms,
+                    chunk_bytes,
+                } => {
+                    // Return a stream with a single audio chunk
+                    let duration = *chunk_duration_ms;
+                    let bytes = *chunk_bytes;
+                    let chunk = AudioChunk::new(
+                        0, // sequence will be assigned by caller
+                        0, // sentence_index will be assigned by caller
+                        Bytes::from(vec![0xAB; bytes]),
+                        duration,
+                    );
+                    Ok(Box::pin(stream::iter(vec![Ok(chunk)])))
+                }
+                MockSynthesisMode::FailInit { error } => Err(ProviderError::SynthesisFailed {
+                    message: error.clone(),
+                }),
+                MockSynthesisMode::FailMidStream {
+                    chunks_before_error,
+                    error,
+                } => {
+                    let mut items: Vec<Result<AudioChunk, ProviderError>> = Vec::new();
+                    for i in 0..*chunks_before_error {
+                        items.push(Ok(AudioChunk::new(
+                            i as u32,
+                            0,
+                            Bytes::from(vec![0xAB; 256]),
+                            100,
+                        )));
+                    }
+                    items.push(Err(ProviderError::SynthesisFailed {
+                        message: error.clone(),
+                    }));
+                    Ok(Box::pin(stream::iter(items)))
+                }
+            }
         }
     }
 
-    /// Helper to create a provider registry with a mock provider
+    /// Helper to create a provider registry with a synthesizing mock provider
     fn create_test_registry() -> ProviderRegistry {
         let mut registry = ProviderRegistry::new();
         registry.register(MockProvider::new("test", "Test Provider"));
+        registry.set_default(ProviderId::new("test"));
+        registry
+    }
+
+    /// Helper to create a registry with a provider that has specific synthesis behavior
+    fn create_test_registry_with_mode(mode: MockSynthesisMode) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register(MockProvider::new("test", "Test Provider").with_synthesis_mode(mode));
         registry.set_default(ProviderId::new("test"));
         registry
     }
@@ -1092,17 +1387,24 @@ mod tests {
 
         sink.messages.clear();
 
-        // Send text - should succeed without sending a response
+        // Send text with a complete sentence - should synthesize and send audio
         let text_msg = r#"{"type":"text","content":"Hello world."}"#;
         let should_continue =
             handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
         assert!(should_continue);
 
-        // No response expected for successful text message processing
-        assert!(sink.messages.is_empty());
+        // Now we expect binary audio frames for the complete sentence
+        assert_eq!(sink.messages.len(), 1);
+        assert!(matches!(sink.messages[0], Message::Binary(_)));
 
         // Session state should transition to Streaming
         assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
+
+        // Session should track accumulated statistics
+        let session_ref = session.as_ref().unwrap();
+        assert!(session_ref.total_duration_ms > 0);
+        assert!(session_ref.total_bytes > 0);
+        assert_eq!(session_ref.audio_sequence, 1);
     }
 
     #[tokio::test]
@@ -1122,12 +1424,17 @@ mod tests {
             handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
         assert!(should_continue);
 
-        // No response expected
-        assert!(sink.messages.is_empty());
+        // Now we expect 2 binary audio frames (one for each complete sentence)
+        assert_eq!(sink.messages.len(), 2);
+        assert!(matches!(sink.messages[0], Message::Binary(_)));
+        assert!(matches!(sink.messages[1], Message::Binary(_)));
 
         // Buffer should contain the incomplete part ("Third")
         assert!(!session.as_ref().unwrap().buffer.is_empty());
         assert_eq!(session.as_ref().unwrap().buffer.current_buffer(), "Third");
+
+        // Session should track 2 audio chunks
+        assert_eq!(session.as_ref().unwrap().audio_sequence, 2);
     }
 
     #[tokio::test]
@@ -1147,7 +1454,7 @@ mod tests {
 
         sink.messages.clear();
 
-        // Send text
+        // Send text (no complete sentence, so no audio)
         let text_msg = r#"{"type":"text","content":"Test"}"#;
         handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
 
@@ -1166,18 +1473,20 @@ mod tests {
         handle_text_message(init_text, &mut sink, &mut session, &registry).await;
         sink.messages.clear();
 
-        // First text message - transitions to Streaming
+        // First text message with complete sentence - transitions to Streaming
         let text_msg1 = r#"{"type":"text","content":"First. "}"#;
         handle_text_message(text_msg1, &mut sink, &mut session, &registry).await;
         assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
 
-        // Second text message - stays in Streaming
+        // Second text message with complete sentence - stays in Streaming
         let text_msg2 = r#"{"type":"text","content":"Second. "}"#;
         handle_text_message(text_msg2, &mut sink, &mut session, &registry).await;
         assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
 
-        // No responses expected
-        assert!(sink.messages.is_empty());
+        // Now we expect 2 binary audio frames (one for each complete sentence)
+        assert_eq!(sink.messages.len(), 2);
+        assert!(matches!(sink.messages[0], Message::Binary(_)));
+        assert!(matches!(sink.messages[1], Message::Binary(_)));
     }
 
     // ==================== Text Done Tests ====================
@@ -1239,6 +1548,11 @@ mod tests {
         let text_msg = r#"{"type":"text","content":"First sentence. Second sentence. Incomplete"}"#;
         handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
 
+        // 2 binary audio frames should have been sent for the 2 complete sentences
+        assert_eq!(sink.messages.len(), 2);
+        assert!(matches!(sink.messages[0], Message::Binary(_)));
+        assert!(matches!(sink.messages[1], Message::Binary(_)));
+
         // Buffer should have the incomplete text
         assert_eq!(
             session.as_ref().unwrap().buffer.current_buffer(),
@@ -1247,28 +1561,35 @@ mod tests {
 
         sink.messages.clear();
 
-        // Send text.done - should flush the incomplete text
+        // Send text.done - should flush the incomplete text and synthesize it
         let done_text = r#"{"type":"text.done"}"#;
         let should_continue =
             handle_text_message(done_text, &mut sink, &mut session, &registry).await;
 
         assert!(should_continue);
-        assert_eq!(sink.messages.len(), 1);
+        // Expect 1 binary frame for the flushed sentence + 1 text frame for audio.done
+        assert_eq!(sink.messages.len(), 2);
+        assert!(matches!(sink.messages[0], Message::Binary(_)));
 
-        // Verify audio.done response has correct sentence count
-        if let Message::Text(json) = &sink.messages[0] {
+        // Verify audio.done response has correct sentence count and statistics
+        if let Message::Text(json) = &sink.messages[1] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::AudioDone {
-                    total_sentences, ..
+                    total_sentences,
+                    total_duration_ms,
+                    total_bytes,
                 } => {
                     // 2 complete sentences + 1 flushed incomplete = 3 total
                     assert_eq!(total_sentences, 3);
+                    // Check statistics are populated (mock returns 100ms and 256 bytes per chunk)
+                    assert_eq!(total_duration_ms, 300); // 3 sentences * 100ms
+                    assert_eq!(total_bytes, 768); // 3 sentences * 256 bytes
                 }
                 _ => panic!("Expected AudioDone, got {:?}", msg),
             }
         } else {
-            panic!("Expected text message");
+            panic!("Expected text message for audio.done");
         }
 
         // Buffer should be empty after flush
@@ -1286,7 +1607,7 @@ mod tests {
         handle_text_message(init_text, &mut sink, &mut session, &registry).await;
         assert_eq!(session.as_ref().unwrap().state, SessionState::Ready);
 
-        // Send text - transitions to Streaming
+        // Send text with complete sentence - transitions to Streaming
         let text_msg = r#"{"type":"text","content":"Hello. "}"#;
         handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
         assert_eq!(session.as_ref().unwrap().state, SessionState::Streaming);
@@ -1315,12 +1636,17 @@ mod tests {
         assert!(session.is_some());
         sink.messages.clear();
 
-        // Send text with sentences
+        // Send text with two complete sentences
         let text_msg = r#"{"type":"text","content":"Hello world. Goodbye world."}"#;
         let should_continue =
             handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
         assert!(should_continue);
-        assert!(sink.messages.is_empty());
+        // 2 binary frames for the 2 complete sentences
+        assert_eq!(sink.messages.len(), 2);
+        assert!(matches!(sink.messages[0], Message::Binary(_)));
+        assert!(matches!(sink.messages[1], Message::Binary(_)));
+
+        sink.messages.clear();
 
         // Send text.done
         let done_text = r#"{"type":"text.done"}"#;
@@ -1328,21 +1654,149 @@ mod tests {
             handle_text_message(done_text, &mut sink, &mut session, &registry).await;
         assert!(should_continue);
 
-        // Verify audio.done was sent
+        // Verify audio.done was sent (no flushed content since buffer was empty)
         assert_eq!(sink.messages.len(), 1);
         if let Message::Text(json) = &sink.messages[0] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::AudioDone {
-                    total_sentences, ..
+                    total_sentences,
+                    total_duration_ms,
+                    total_bytes,
                 } => {
                     assert_eq!(total_sentences, 2);
+                    assert_eq!(total_duration_ms, 200); // 2 sentences * 100ms
+                    assert_eq!(total_bytes, 512); // 2 sentences * 256 bytes
                 }
                 _ => panic!("Expected AudioDone, got {:?}", msg),
             }
+        } else {
+            panic!("Expected text message for audio.done");
         }
 
         // Session is closed
         assert_eq!(session.as_ref().unwrap().state, SessionState::Closed);
+    }
+
+    // ==================== Audio Streaming Tests ====================
+
+    #[tokio::test]
+    async fn test_audio_chunk_binary_frame_format() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry();
+
+        // Initialize session
+        let init_text = r#"{"type":"session.init"}"#;
+        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        sink.messages.clear();
+
+        // Send text with one complete sentence
+        let text_msg = r#"{"type":"text","content":"Hello world."}"#;
+        handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+
+        // Should have 1 binary frame
+        assert_eq!(sink.messages.len(), 1);
+
+        // Parse the binary frame
+        if let Message::Binary(data) = &sink.messages[0] {
+            // Frame should have 12-byte header + data
+            assert!(data.len() >= 12);
+
+            // Parse header (little-endian u32s)
+            let sequence = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            let sentence_index = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+            let duration_ms = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+
+            assert_eq!(sequence, 0);
+            assert_eq!(sentence_index, 0);
+            assert_eq!(duration_ms, 100); // Mock provider returns 100ms
+
+            // Audio data should be mock data (0xAB bytes)
+            let audio_data = &data[12..];
+            assert_eq!(audio_data.len(), 256); // Mock provider returns 256 bytes
+            assert!(audio_data.iter().all(|&b| b == 0xAB));
+        } else {
+            panic!("Expected binary message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_synthesis_error_sends_error_message() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_mode(MockSynthesisMode::FailInit {
+            error: "Test synthesis failure".to_string(),
+        });
+
+        // Initialize session
+        let init_text = r#"{"type":"session.init"}"#;
+        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        sink.messages.clear();
+
+        // Send text with one complete sentence - synthesis will fail
+        let text_msg = r#"{"type":"text","content":"Hello world."}"#;
+        let should_continue =
+            handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+
+        // Should continue (non-fatal error)
+        assert!(should_continue);
+
+        // Should have 1 error message (no binary audio due to failure)
+        assert_eq!(sink.messages.len(), 1);
+
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::Error {
+                    code,
+                    fatal,
+                    sentence_index,
+                    ..
+                } => {
+                    assert_eq!(code, "synthesis_failed");
+                    assert!(!fatal);
+                    assert_eq!(sentence_index, Some(0));
+                }
+                _ => panic!("Expected Error, got {:?}", msg),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multiple_sentences_sequence_numbers() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry();
+
+        // Initialize session
+        let init_text = r#"{"type":"session.init"}"#;
+        handle_text_message(init_text, &mut sink, &mut session, &registry).await;
+        sink.messages.clear();
+
+        // Send text with three complete sentences
+        let text_msg = r#"{"type":"text","content":"First. Second. Third."}"#;
+        handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
+
+        // Should have 3 binary frames
+        assert_eq!(sink.messages.len(), 3);
+
+        // Verify sequence numbers and sentence indices
+        for (i, msg) in sink.messages.iter().enumerate() {
+            if let Message::Binary(data) = msg {
+                let sequence = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                let sentence_index = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+
+                assert_eq!(sequence, i as u32);
+                assert_eq!(sentence_index, i as u32);
+            } else {
+                panic!("Expected binary message at index {}", i);
+            }
+        }
+
+        // Session should track 3 audio chunks
+        assert_eq!(session.as_ref().unwrap().audio_sequence, 3);
     }
 }

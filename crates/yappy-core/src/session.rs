@@ -59,6 +59,15 @@ pub struct Session {
 
     /// Code block handling mode
     pub code_block_mode: CodeBlockMode,
+
+    /// Cumulative audio duration in milliseconds (for audio.done statistics)
+    pub total_duration_ms: u64,
+
+    /// Cumulative audio bytes sent (for audio.done statistics)
+    pub total_bytes: u64,
+
+    /// Current audio chunk sequence number
+    pub audio_sequence: u32,
 }
 
 impl Session {
@@ -80,7 +89,21 @@ impl Session {
             last_activity: now,
             state: SessionState::Ready,
             code_block_mode,
+            total_duration_ms: 0,
+            total_bytes: 0,
+            audio_sequence: 0,
         }
+    }
+
+    /// Record audio chunk statistics and increment sequence number
+    ///
+    /// Returns the sequence number that was assigned to this chunk.
+    pub fn record_audio_chunk(&mut self, duration_ms: u32, bytes: usize) -> u32 {
+        let seq = self.audio_sequence;
+        self.audio_sequence += 1;
+        self.total_duration_ms += u64::from(duration_ms);
+        self.total_bytes += bytes as u64;
+        seq
     }
 
     /// Update last activity timestamp
