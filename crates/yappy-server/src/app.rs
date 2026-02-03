@@ -21,6 +21,7 @@ use tower_http::{
 use yappy_core::{ProviderMetadata, ProviderStatus};
 
 use crate::state::AppState;
+use crate::ws::ws_upgrade_handler;
 
 /// X-Request-ID header name
 const X_REQUEST_ID: &str = "x-request-id";
@@ -54,7 +55,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
         .route("/providers", get(providers_handler))
-        .route("/ws", any(ws_handler))
+        .route("/ws", any(ws_upgrade_handler))
         .layer(PropagateHeaderLayer::new(x_request_id.clone()))
         .layer(SetRequestIdLayer::new(x_request_id, MakeRequestUuid))
         .with_state(state)
@@ -232,27 +233,6 @@ pub async fn providers_handler(State(state): State<AppState>) -> Json<ProvidersR
         providers,
         default_provider,
     })
-}
-
-/// WebSocket handler (stub)
-///
-/// This is a placeholder for the WebSocket streaming TTS endpoint.
-/// Full implementation will be added in a later phase.
-///
-/// # Response
-///
-/// Currently returns `501 Not Implemented`.
-pub async fn ws_handler() -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": {
-                "code": "not_implemented",
-                "message": "WebSocket endpoint not yet implemented"
-            }
-        })),
-    )
-        .into_response()
 }
 
 #[cfg(test)]
@@ -469,7 +449,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ws_not_implemented() {
+    async fn test_ws_requires_upgrade() {
+        // Non-WebSocket requests to /ws should fail
+        // The WebSocketUpgrade extractor returns 400 when upgrade headers are missing
         let state = create_empty_state();
         let app = create_router(state);
 
@@ -478,7 +460,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        // Without proper WebSocket upgrade headers, the request should be rejected
+        // Axum's WebSocketUpgrade returns a 400 Bad Request when headers are missing
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

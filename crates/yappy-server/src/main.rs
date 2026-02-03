@@ -5,9 +5,11 @@
 
 pub mod app;
 mod state;
+pub mod ws;
 
 pub use app::create_router;
 pub use state::{AppState, ProviderRegistry};
+pub use ws::ws_upgrade_handler;
 
 use clap::Parser;
 use std::path::PathBuf;

@@ -126,10 +126,10 @@
 - [x] T056 [GIT] Verify working tree is clean before starting Phase 3
 - [x] T057 [GIT] Pull and rebase on origin/main if needed (already up to date)
 - [x] T058 [US1] Create specs/001-streaming-tts-server/retro/P3.md for this phase
-- [ ] T059 [GIT] Commit: initialize phase 3 retro
+- [x] T059 [GIT] Commit: initialize phase 3 retro
 
 ### WebSocket Handler Implementation
-- [ ] T060 [US1] Implement WebSocket upgrade handler in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T060 [US1] Implement WebSocket upgrade handler in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T061 [GIT] Commit: add WebSocket upgrade handler
 - [ ] T062 [US1] Implement session.init message handling in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T063 [GIT] Commit: add session.init handling
