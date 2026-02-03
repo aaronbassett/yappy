@@ -323,11 +323,11 @@
 ### Audio Transcoding
 - [x] T164 [P] [US5] Implement Opus encoder wrapper using audiopus in crates/yappy-core/src/transcode.rs (use devs:rust-dev agent)
 - [x] T165 [P] [US5] Implement MP3 encoder wrapper using mp3lame-encoder in crates/yappy-core/src/transcode.rs (use devs:rust-dev agent)
-- [ ] T166 [GIT] Commit: add audio encoders
-- [ ] T167 [US5] Implement format negotiation in session.init (check provider support, transcode if needed) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T168 [GIT] Commit: add format negotiation
-- [ ] T169 [US5] Implement unsupported format error (invalid_format) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T170 [GIT] Commit: add invalid_format error
+- [x] T166 [GIT] Commit: add audio encoders
+- [x] T167 [US5] Implement format negotiation in session.init (check provider support, transcode if needed) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T168 [GIT] Commit: add format negotiation
+- [x] T169 [US5] Implement unsupported format error (invalid_format) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T170 [GIT] Commit: add invalid_format error
 
 ### Integration Test
 - [ ] T171 [US5] Create audio format integration test in tests/integration/ws_formats.rs (use devs:rust-dev agent)

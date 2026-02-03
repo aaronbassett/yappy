@@ -30,8 +30,10 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
+use yappy_core::audio::AudioCodec;
 use yappy_core::buffer::Sentence;
 use yappy_core::provider::ProviderId;
+use yappy_core::transcode::Transcoder;
 use yappy_core::{
     AudioFormat, ClientMessage, CodeBlockMode, ServerMessage, Session, SessionState, TtsProvider,
     VoiceConfig,
@@ -417,7 +419,7 @@ where
 ///
 /// Returns `true` to continue the message loop, `false` on fatal errors
 /// that require closing the connection.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn handle_session_init<S>(
     sender: &mut S,
     session: &mut Option<Session>,
@@ -514,14 +516,40 @@ where
         }
     };
 
-    // Resolve audio format
-    let audio_format = requested_format.unwrap_or_else(|| {
+    // Resolve and validate audio format
+    let audio_format = if let Some(requested) = requested_format {
+        // Client requested a specific format - validate it
+        let Some(resolved) =
+            negotiate_audio_format(&metadata.supported_formats, &requested)
+        else {
+            // Format cannot be provided (not native and can't transcode)
+            let available_codecs: Vec<String> = metadata
+                .supported_formats
+                .iter()
+                .map(|f| f.codec.to_string())
+                .collect();
+            let response = ServerMessage::session_error(
+                "invalid_format",
+                format!(
+                    "Audio format '{}' is not available for provider '{}'. Available: {}. \
+                     Transcoding from PCM is supported for: opus, mp3.",
+                    requested.codec, provider_id, available_codecs.join(", ")
+                ),
+            );
+            if let Err(err) = send_server_message(sender, &response).await {
+                warn!("Failed to send response: {err}");
+            }
+            return false;
+        };
+        resolved
+    } else {
+        // Use provider's default format (first in supported_formats)
         metadata
             .supported_formats
             .first()
             .cloned()
             .unwrap_or_default()
-    });
+    };
 
     // Resolve code block mode
     let code_block_mode = requested_code_block_mode.unwrap_or_default();
@@ -826,6 +854,52 @@ where
         .send(Message::Text(json.into()))
         .await
         .map_err(|e| format!("Send failed: {e}"))
+}
+
+/// Negotiate audio format based on provider capabilities and transcoding.
+///
+/// This function determines if the requested audio format can be provided,
+/// either natively by the provider or via transcoding from PCM.
+///
+/// # Arguments
+///
+/// * `supported_formats` - Formats natively supported by the provider
+/// * `requested` - The format requested by the client
+///
+/// # Returns
+///
+/// Returns `Some(AudioFormat)` if the format can be provided:
+/// - The requested format if natively supported
+/// - The requested format if the provider supports PCM and transcoding is available
+///
+/// Returns `None` if the format cannot be provided.
+fn negotiate_audio_format(
+    supported_formats: &[AudioFormat],
+    requested: &AudioFormat,
+) -> Option<AudioFormat> {
+    // Check if the exact codec is natively supported
+    let native_support = supported_formats
+        .iter()
+        .any(|f| f.codec == requested.codec);
+
+    if native_support {
+        // Provider natively supports this codec - use the requested format
+        return Some(requested.clone());
+    }
+
+    // Check if we can transcode from PCM to the requested format
+    let provider_supports_pcm = supported_formats
+        .iter()
+        .any(|f| f.codec == AudioCodec::Pcm);
+
+    if provider_supports_pcm && Transcoder::can_transcode(AudioCodec::Pcm, requested.codec) {
+        // We can transcode from PCM to the requested format
+        // Return the requested format (transcoding will happen at stream time)
+        return Some(requested.clone());
+    }
+
+    // Format cannot be provided
+    None
 }
 
 #[cfg(test)]
@@ -1586,6 +1660,271 @@ mod tests {
                 _ => panic!("Expected SessionError, got {msg:?}"),
             }
         }
+    }
+
+    // ==================== Format Negotiation Tests ====================
+
+    #[test]
+    fn test_negotiate_audio_format_native_support() {
+        // Provider natively supports Opus
+        let formats = vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: None,
+        }];
+
+        let requested = AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: None,
+        };
+
+        let result = negotiate_audio_format(&formats, &requested);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().codec, yappy_core::AudioCodec::Opus);
+    }
+
+    #[test]
+    fn test_negotiate_audio_format_transcode_from_pcm() {
+        // Provider only supports PCM, client wants Opus
+        let formats = vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Pcm,
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: Some(16),
+        }];
+
+        let requested = AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: None,
+        };
+
+        let result = negotiate_audio_format(&formats, &requested);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().codec, yappy_core::AudioCodec::Opus);
+    }
+
+    #[test]
+    fn test_negotiate_audio_format_transcode_to_mp3() {
+        // Provider only supports PCM, client wants MP3
+        let formats = vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Pcm,
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: Some(16),
+        }];
+
+        let requested = AudioFormat {
+            codec: yappy_core::AudioCodec::Mp3,
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: None,
+        };
+
+        let result = negotiate_audio_format(&formats, &requested);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().codec, yappy_core::AudioCodec::Mp3);
+    }
+
+    #[test]
+    fn test_negotiate_audio_format_unsupported() {
+        // Provider only supports Opus (no PCM), client wants MP3 - can't transcode
+        let formats = vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: None,
+        }];
+
+        let requested = AudioFormat {
+            codec: yappy_core::AudioCodec::Mp3,
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: None,
+        };
+
+        let result = negotiate_audio_format(&formats, &requested);
+        assert!(result.is_none());
+    }
+
+    /// Helper to create a provider registry with specific supported formats
+    fn create_test_registry_with_formats(formats: Vec<AudioFormat>) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+
+        // Create a mock provider with specific formats
+        struct FormatProvider {
+            formats: Vec<AudioFormat>,
+        }
+
+        #[async_trait]
+        impl TtsProvider for FormatProvider {
+            fn metadata(&self) -> yappy_core::provider::ProviderMetadata {
+                yappy_core::provider::ProviderMetadata {
+                    id: ProviderId::new("format_test"),
+                    name: "Format Test Provider".to_string(),
+                    description: "Provider for testing format negotiation".to_string(),
+                    voices: vec![yappy_core::provider::VoiceInfo {
+                        id: "test_voice".to_string(),
+                        name: "Test Voice".to_string(),
+                        language: "en-US".to_string(),
+                        gender: None,
+                        sample_url: None,
+                    }],
+                    supported_formats: self.formats.clone(),
+                    options_schema: None,
+                }
+            }
+
+            async fn health_check(&self) -> yappy_core::ProviderStatus {
+                yappy_core::ProviderStatus::Available
+            }
+
+            async fn synthesize(
+                &self,
+                _text: &str,
+                _voice: &VoiceConfig,
+                _format: AudioFormat,
+                _cancel: CancellationToken,
+            ) -> Result<yappy_core::audio::AudioStream, yappy_core::error::ProviderError> {
+                // Return an empty stream
+                Ok(Box::pin(stream::empty()))
+            }
+        }
+
+        registry.register(FormatProvider { formats });
+        registry.set_default(ProviderId::new("format_test"));
+        registry
+    }
+
+    #[tokio::test]
+    async fn test_session_init_with_valid_format() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_formats(vec![
+            AudioFormat {
+                codec: yappy_core::AudioCodec::Opus,
+                sample_rate: 48000,
+                channels: 1,
+                bits_per_sample: None,
+            },
+            AudioFormat {
+                codec: yappy_core::AudioCodec::Pcm,
+                sample_rate: 24000,
+                channels: 1,
+                bits_per_sample: Some(16),
+            },
+        ]);
+
+        // Request Opus which is natively supported
+        let text = r#"{"type":"session.init","audio_format":{"codec":"opus","sample_rate":48000,"channels":1}}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        assert!(should_continue);
+        assert!(session.is_some());
+        assert_eq!(
+            session.as_ref().unwrap().audio_format.codec,
+            yappy_core::AudioCodec::Opus
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_init_with_transcode_format() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        // Provider only supports PCM
+        let registry = create_test_registry_with_formats(vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Pcm,
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: Some(16),
+        }]);
+
+        // Request MP3 which can be transcoded from PCM
+        let text = r#"{"type":"session.init","audio_format":{"codec":"mp3","sample_rate":24000,"channels":1}}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        assert!(should_continue);
+        assert!(session.is_some());
+        assert_eq!(
+            session.as_ref().unwrap().audio_format.codec,
+            yappy_core::AudioCodec::Mp3
+        );
+    }
+
+    #[tokio::test]
+    async fn test_session_init_error_invalid_format() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        // Provider only supports Opus (no PCM, so can't transcode to MP3)
+        let registry = create_test_registry_with_formats(vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: None,
+        }]);
+
+        // Request MP3 which can't be provided
+        let text = r#"{"type":"session.init","audio_format":{"codec":"mp3","sample_rate":48000,"channels":1}}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        // Should return false (fatal error)
+        assert!(!should_continue);
+        assert!(session.is_none());
+        assert_eq!(sink.messages.len(), 1);
+
+        if let Message::Text(json) = &sink.messages[0] {
+            let msg: ServerMessage = serde_json::from_str(json).unwrap();
+            match msg {
+                ServerMessage::SessionError { code, message, .. } => {
+                    assert_eq!(code, "invalid_format");
+                    assert!(message.contains("mp3"));
+                    assert!(message.contains("not available"));
+                }
+                _ => panic!("Expected SessionError, got {msg:?}"),
+            }
+        } else {
+            panic!("Expected text message");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_init_default_format_when_not_specified() {
+        let mut sink = MockSink::new();
+        let mut session = None;
+        let registry = create_test_registry_with_formats(vec![
+            AudioFormat {
+                codec: yappy_core::AudioCodec::Pcm,
+                sample_rate: 24000,
+                channels: 1,
+                bits_per_sample: Some(16),
+            },
+            AudioFormat {
+                codec: yappy_core::AudioCodec::Opus,
+                sample_rate: 48000,
+                channels: 1,
+                bits_per_sample: None,
+            },
+        ]);
+
+        // No format specified - should use first one (PCM)
+        let text = r#"{"type":"session.init"}"#;
+
+        let should_continue = handle_text_message(text, &mut sink, &mut session, &registry).await;
+
+        assert!(should_continue);
+        assert!(session.is_some());
+        // Should use the first format (PCM) as default
+        assert_eq!(
+            session.as_ref().unwrap().audio_format.codec,
+            yappy_core::AudioCodec::Pcm
+        );
     }
 
     // ==================== Text Message Tests ====================
