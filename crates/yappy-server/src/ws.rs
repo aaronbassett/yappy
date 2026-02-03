@@ -192,11 +192,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // The guard automatically unregisters when dropped
     let session_guard = state.shutdown().register_session();
 
+    // Get timeout configurations (FR-016)
+    let idle_timeout = state.config().server.idle_timeout();
+    let session_init_timeout = state.config().server.session_init_timeout();
+    let synthesis_timeout = state.config().server.synthesis_timeout();
+
     // Get audio channel capacity from config (for backpressure)
     let audio_channel_capacity = state.config().server.audio_channel_capacity;
     debug!(
         audio_channel_capacity,
-        "Configuring backpressure with bounded channel"
+        idle_timeout_secs = idle_timeout.as_secs(),
+        session_init_timeout_secs = session_init_timeout.as_secs(),
+        synthesis_timeout_secs = synthesis_timeout.as_secs(),
+        "Configuring WebSocket connection"
     );
 
     // Split the socket into sender and receiver for independent handling
@@ -207,6 +215,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Session state for this connection (None until session.init is received)
     let mut session: Option<Session> = None;
+
+    // Track connection start time for session init timeout (T297)
+    let connection_start = Instant::now();
+
+    // Track last activity for idle timeout (T295)
+    let mut last_activity = Instant::now();
 
     // Get the shutdown token for monitoring - we hold this for the lifetime of the connection
     let shutdown_token = session_guard.token();
@@ -224,6 +238,43 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             break;
         }
 
+        // Check for session init timeout (T297) - only if session is not initialized yet
+        if session.is_none() && connection_start.elapsed() > session_init_timeout {
+            warn!(
+                elapsed_secs = connection_start.elapsed().as_secs(),
+                timeout_secs = session_init_timeout.as_secs(),
+                "Session init timeout - no session.init received"
+            );
+            let response = ServerMessage::session_error(
+                "session_init_timeout",
+                format!(
+                    "No session.init message received within {} seconds",
+                    session_init_timeout.as_secs()
+                ),
+            );
+            if let Err(err) = send_server_message(bp_sender.inner_mut(), &response).await {
+                warn!("Failed to send session init timeout error: {}", err);
+            }
+            break;
+        }
+
+        // Check for idle timeout (T295)
+        if last_activity.elapsed() > idle_timeout {
+            warn!(
+                session_id = session.as_ref().map(|s| s.id.to_string()).as_deref(),
+                elapsed_secs = last_activity.elapsed().as_secs(),
+                timeout_secs = idle_timeout.as_secs(),
+                "Idle connection timeout"
+            );
+            // Send close frame with reason - the connection will be closed after this
+            // Note: We don't send a JSON error here because the WebSocket close frame
+            // carries the reason. The client should handle the close frame appropriately.
+            if let Some(ref s) = session {
+                info!(session_id = %s.id, "Closing connection due to idle timeout");
+            }
+            break;
+        }
+
         // Determine the flush timeout duration based on session state.
         // If we have a session with content in the buffer, use its configured timeout.
         // Otherwise, use a longer timeout (effectively just waiting for messages).
@@ -231,6 +282,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             .as_ref()
             .filter(|s| !s.buffer.is_empty() && s.state == SessionState::Streaming)
             .map_or(DEFAULT_FLUSH_TIMEOUT, |s| s.buffer.flush_timeout());
+
+        // Calculate how long until the next timeout event we need to check
+        let time_until_idle_timeout = idle_timeout.saturating_sub(last_activity.elapsed());
+        let time_until_init_timeout = if session.is_none() {
+            session_init_timeout.saturating_sub(connection_start.elapsed())
+        } else {
+            Duration::MAX // No init timeout once session is established
+        };
+        let next_timeout_check = flush_timeout
+            .min(time_until_idle_timeout)
+            .min(time_until_init_timeout);
 
         tokio::select! {
             // Check for shutdown signal
@@ -246,14 +308,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             result = receiver.next() => {
                 match result {
                     Some(Ok(message)) => {
+                        // Update last activity timestamp on any message received (T295)
+                        last_activity = Instant::now();
+
                         let buffer_config: BufferConfig = state.config().buffer.clone().into();
-                        if !process_message_with_cancellation(
+                        if !process_message_with_cancellation_and_timeout(
                             message,
                             &mut bp_sender,
                             &mut session,
                             state.providers(),
                             &buffer_config,
                             &session_guard,
+                            synthesis_timeout,
                         ).await {
                             // Connection should be closed
                             break;
@@ -271,11 +337,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
 
-            // Check for flush timeout when buffer has content
-            () = tokio::time::sleep(flush_timeout), if session.as_ref().is_some_and(|s| !s.buffer.is_empty() && s.state == SessionState::Streaming) => {
+            // Periodic timeout check (handles both flush, idle, and init timeouts)
+            () = tokio::time::sleep(next_timeout_check) => {
                 // Check if the buffer should be flushed due to timeout
                 if let Some(ref mut session) = session {
-                    if session.buffer.should_timeout_flush() {
+                    if !session.buffer.is_empty()
+                        && session.state == SessionState::Streaming
+                        && session.buffer.should_timeout_flush()
+                    {
                         if let Some(sentence) = session.buffer.flush() {
                             debug!(
                                 session_id = %session.id,
@@ -285,12 +354,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
                             // Synthesize the flushed sentence with cancellation support
                             if let Some(provider) = state.providers().get(&session.provider_id) {
-                                if !synthesize_and_stream_with_cancellation(
+                                if !synthesize_and_stream_with_timeout(
                                     vec![sentence],
                                     session,
                                     &mut bp_sender,
                                     provider.as_ref(),
                                     &session_guard,
+                                    synthesis_timeout,
                                 )
                                 .await
                                 {
@@ -307,6 +377,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         }
                     }
                 }
+                // Continue to next iteration - the timeout checks at the start of the loop
+                // will handle session init timeout and idle timeout
             }
         }
     }
@@ -1178,6 +1250,7 @@ where
 /// * `providers` - Reference to the provider registry
 /// * `buffer_config` - Buffer configuration for new sessions
 /// * `session_guard` - Session guard for accessing cancellation tokens
+#[allow(dead_code)]
 async fn process_message_with_cancellation<S>(
     message: Message,
     sender: &mut BackpressureSender<S>,
@@ -1226,7 +1299,7 @@ where
 ///
 /// Similar to `handle_text_message` but propagates the session guard
 /// to synthesis operations for graceful shutdown support.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, dead_code)]
 async fn handle_text_message_with_cancellation<S>(
     text: &str,
     sender: &mut BackpressureSender<S>,
@@ -1435,7 +1508,7 @@ where
 /// # Returns
 ///
 /// Returns `true` if all sentences were processed, `false` on fatal error.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, dead_code)]
 async fn synthesize_and_stream_with_cancellation<S>(
     sentences: Vec<Sentence>,
     session: &mut Session,
@@ -1569,6 +1642,471 @@ where
     }
 
     true
+}
+
+/// Synthesize sentences with timeout support (FR-016, T296).
+///
+/// This function wraps synthesis operations with a configurable timeout. If synthesis
+/// for a single sentence exceeds the timeout, a `synthesis_failed` error with `timeout`
+/// reason is sent and the sentence is skipped.
+///
+/// # Arguments
+///
+/// * `sentences` - Sentences to synthesize
+/// * `session` - Mutable reference to update statistics
+/// * `sender` - WebSocket sender for streaming audio frames
+/// * `provider` - The TTS provider to use for synthesis
+/// * `session_guard` - Session guard providing cancellation tokens
+/// * `timeout` - Maximum time allowed for synthesizing each sentence
+///
+/// # Returns
+///
+/// Returns `true` if all sentences were processed, `false` on fatal error.
+#[allow(clippy::too_many_lines)]
+async fn synthesize_and_stream_with_timeout<S>(
+    sentences: Vec<Sentence>,
+    session: &mut Session,
+    sender: &mut BackpressureSender<S>,
+    provider: &dyn TtsProvider,
+    session_guard: &SessionGuard,
+    timeout: Duration,
+) -> bool
+where
+    S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    for sentence in sentences {
+        // Check for shutdown before starting each sentence
+        if session_guard.is_shutting_down() {
+            debug!(
+                session_id = %session.id,
+                sentence_index = sentence.index,
+                "Skipping sentence synthesis due to shutdown"
+            );
+            return true;
+        }
+
+        debug!(
+            session_id = %session.id,
+            sentence_index = sentence.index,
+            timeout_secs = timeout.as_secs(),
+            "Starting synthesis for sentence with timeout"
+        );
+
+        // Create a child cancellation token that will be cancelled on shutdown
+        let cancel_token = session_guard.child_token();
+
+        // Wrap the synthesis call with a timeout (T296)
+        let synthesis_result = tokio::time::timeout(
+            timeout,
+            provider.synthesize(
+                &sentence.text,
+                &session.voice,
+                session.audio_format.clone(),
+                cancel_token.clone(),
+            ),
+        )
+        .await;
+
+        let audio_stream = match synthesis_result {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                // Synthesis failed (not due to timeout)
+                if cancel_token.is_cancelled() {
+                    debug!(
+                        session_id = %session.id,
+                        sentence_index = sentence.index,
+                        "Synthesis cancelled due to shutdown"
+                    );
+                    return true;
+                }
+
+                warn!(
+                    session_id = %session.id,
+                    sentence_index = sentence.index,
+                    error_code = err.code(),
+                    "Synthesis failed for sentence"
+                );
+
+                let response =
+                    ServerMessage::error_with_sentence(err.code(), err.to_string(), sentence.index);
+                if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
+                    warn!("Failed to send synthesis error: {}", send_err);
+                    return false;
+                }
+                continue;
+            }
+            Err(_elapsed) => {
+                // Synthesis timed out (T296)
+                warn!(
+                    session_id = %session.id,
+                    sentence_index = sentence.index,
+                    timeout_secs = timeout.as_secs(),
+                    "Synthesis timeout for sentence"
+                );
+
+                let response = ServerMessage::error_with_sentence(
+                    "synthesis_failed",
+                    format!("Synthesis timed out after {} seconds", timeout.as_secs()),
+                    sentence.index,
+                );
+                if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
+                    warn!("Failed to send synthesis timeout error: {}", send_err);
+                    return false;
+                }
+                continue;
+            }
+        };
+
+        // Stream audio chunks with per-chunk timeout monitoring
+        let mut audio_stream = audio_stream;
+        let chunk_start = Instant::now();
+
+        while let Some(chunk_result) = audio_stream.next().await {
+            // Check for cancellation during streaming
+            if cancel_token.is_cancelled() {
+                debug!(
+                    session_id = %session.id,
+                    sentence_index = sentence.index,
+                    "Audio streaming cancelled due to shutdown"
+                );
+                return true;
+            }
+
+            // Check if streaming has exceeded the timeout (for long audio streams)
+            if chunk_start.elapsed() > timeout {
+                warn!(
+                    session_id = %session.id,
+                    sentence_index = sentence.index,
+                    elapsed_secs = chunk_start.elapsed().as_secs(),
+                    "Audio streaming timeout for sentence"
+                );
+
+                let response = ServerMessage::error_with_sentence(
+                    "synthesis_failed",
+                    format!(
+                        "Audio streaming timed out after {} seconds",
+                        chunk_start.elapsed().as_secs()
+                    ),
+                    sentence.index,
+                );
+                if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
+                    warn!("Failed to send streaming timeout error: {}", send_err);
+                    return false;
+                }
+                break;
+            }
+
+            match chunk_result {
+                Ok(mut chunk) => {
+                    chunk.sequence =
+                        session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
+                    chunk.sentence_index = sentence.index;
+
+                    debug!(
+                        session_id = %session.id,
+                        sequence = chunk.sequence,
+                        sentence_index = chunk.sentence_index,
+                        bytes = chunk.data.len(),
+                        duration_ms = chunk.duration_ms,
+                        "Sending audio chunk"
+                    );
+
+                    let frame = chunk.to_binary_frame();
+                    if let Err(err) = sender.send_binary(frame.to_vec()).await {
+                        warn!("Failed to send audio chunk: {}", err);
+                        return false;
+                    }
+                }
+                Err(err) => {
+                    warn!(
+                        session_id = %session.id,
+                        sentence_index = sentence.index,
+                        error_code = err.code(),
+                        "Audio stream error for sentence"
+                    );
+
+                    let response = ServerMessage::error_with_sentence(
+                        err.code(),
+                        err.to_string(),
+                        sentence.index,
+                    );
+                    if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await
+                    {
+                        warn!("Failed to send stream error: {}", send_err);
+                        return false;
+                    }
+                    break;
+                }
+            }
+        }
+
+        debug!(
+            session_id = %session.id,
+            sentence_index = sentence.index,
+            "Completed synthesis for sentence"
+        );
+    }
+
+    true
+}
+
+/// Process a single WebSocket message with cancellation and timeout support.
+///
+/// This is a wrapper around message handling that passes the session guard
+/// for cancellation token propagation and applies synthesis timeout.
+///
+/// # Arguments
+///
+/// * `message` - The received WebSocket message
+/// * `sender` - Mutable reference to the backpressure sender for responses
+/// * `session` - Mutable reference to the current session state
+/// * `providers` - Reference to the provider registry
+/// * `buffer_config` - Buffer configuration for new sessions
+/// * `session_guard` - Session guard for accessing cancellation tokens
+/// * `synthesis_timeout` - Maximum time for synthesis operations
+async fn process_message_with_cancellation_and_timeout<S>(
+    message: Message,
+    sender: &mut BackpressureSender<S>,
+    session: &mut Option<Session>,
+    providers: &ProviderRegistry,
+    buffer_config: &BufferConfig,
+    session_guard: &SessionGuard,
+    synthesis_timeout: Duration,
+) -> bool
+where
+    S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    match message {
+        Message::Text(text) => {
+            handle_text_message_with_timeout(
+                &text,
+                sender,
+                session,
+                providers,
+                buffer_config,
+                session_guard,
+                synthesis_timeout,
+            )
+            .await
+        }
+        Message::Binary(data) => handle_binary_message(&data, sender.inner_mut()).await,
+        Message::Ping(_) => {
+            debug!("Received ping");
+            true
+        }
+        Message::Pong(_) => {
+            debug!("Received pong");
+            true
+        }
+        Message::Close(frame) => {
+            if let Some(cf) = &frame {
+                info!(code = %cf.code, "Received close frame");
+            } else {
+                info!("Received close frame (no reason)");
+            }
+            false
+        }
+    }
+}
+
+/// Handle a text WebSocket frame with timeout support.
+///
+/// Similar to `handle_text_message_with_cancellation` but applies synthesis timeout
+/// to all synthesis operations.
+#[allow(clippy::too_many_lines)]
+async fn handle_text_message_with_timeout<S>(
+    text: &str,
+    sender: &mut BackpressureSender<S>,
+    session: &mut Option<Session>,
+    providers: &ProviderRegistry,
+    buffer_config: &BufferConfig,
+    session_guard: &SessionGuard,
+    synthesis_timeout: Duration,
+) -> bool
+where
+    S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    match serde_json::from_str::<ClientMessage>(text) {
+        Ok(client_msg) => match client_msg {
+            ClientMessage::SessionInit {
+                provider,
+                voice,
+                audio_format,
+                code_block_mode,
+            } => {
+                debug!(
+                    message_type = "session.init",
+                    provider = provider.as_deref().unwrap_or("default"),
+                    "Received client message"
+                );
+
+                handle_session_init(
+                    sender.inner_mut(),
+                    session,
+                    providers,
+                    provider,
+                    voice,
+                    audio_format,
+                    code_block_mode,
+                    buffer_config,
+                )
+                .await
+            }
+            ClientMessage::Text { content } => {
+                debug!(message_type = "text", "Received client message");
+
+                let Some(session) = session.as_mut() else {
+                    let response = ServerMessage::error(
+                        "no_session",
+                        "No active session - send session.init first",
+                    );
+                    if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                        warn!("Failed to send response: {}", err);
+                        return false;
+                    }
+                    return true;
+                };
+
+                session.touch();
+
+                if session.state == SessionState::Ready {
+                    session.state = SessionState::Streaming;
+                    debug!(
+                        session_id = %session.id,
+                        "Session transitioned to Streaming state"
+                    );
+                }
+
+                let sentences = session.buffer.push(&content);
+
+                if !sentences.is_empty() {
+                    debug!(
+                        session_id = %session.id,
+                        sentence_count = sentences.len(),
+                        "Extracted sentences from buffer"
+                    );
+
+                    if let Some(provider) = providers.get(&session.provider_id) {
+                        if !synthesize_and_stream_with_timeout(
+                            sentences,
+                            session,
+                            sender,
+                            provider.as_ref(),
+                            session_guard,
+                            synthesis_timeout,
+                        )
+                        .await
+                        {
+                            return false;
+                        }
+                    } else {
+                        warn!(
+                            session_id = %session.id,
+                            provider_id = %session.provider_id,
+                            "Provider not found during synthesis"
+                        );
+                        let response = ServerMessage::error(
+                            "provider_gone",
+                            "TTS provider is no longer available",
+                        );
+                        if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                            warn!("Failed to send error: {}", err);
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            }
+            ClientMessage::TextDone => {
+                debug!(message_type = "text.done", "Received client message");
+
+                let Some(session) = session.as_mut() else {
+                    let response = ServerMessage::error(
+                        "no_session",
+                        "No active session - send session.init first",
+                    );
+                    if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                        warn!("Failed to send response: {}", err);
+                        return false;
+                    }
+                    return true;
+                };
+
+                session.state = SessionState::Completing;
+                debug!(
+                    session_id = %session.id,
+                    "Session transitioned to Completing state"
+                );
+
+                if let Some(sentence) = session.buffer.flush() {
+                    debug!(
+                        session_id = %session.id,
+                        sentence_index = sentence.index,
+                        "Flushed remaining buffer content"
+                    );
+
+                    if let Some(provider) = providers.get(&session.provider_id) {
+                        if !synthesize_and_stream_with_timeout(
+                            vec![sentence],
+                            session,
+                            sender,
+                            provider.as_ref(),
+                            session_guard,
+                            synthesis_timeout,
+                        )
+                        .await
+                        {
+                            return false;
+                        }
+                    } else {
+                        warn!(
+                            session_id = %session.id,
+                            provider_id = %session.provider_id,
+                            "Provider not found during flush synthesis"
+                        );
+                    }
+                }
+
+                let total_sentences = session.buffer.sentence_index();
+
+                let response = ServerMessage::audio_done(
+                    total_sentences,
+                    session.total_duration_ms,
+                    session.total_bytes,
+                );
+                if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                    warn!("Failed to send audio.done: {}", err);
+                    return false;
+                }
+
+                session.state = SessionState::Closed;
+                debug!(
+                    session_id = %session.id,
+                    total_sentences = total_sentences,
+                    total_duration_ms = session.total_duration_ms,
+                    total_bytes = session.total_bytes,
+                    "Session completed and closed"
+                );
+
+                true
+            }
+        },
+        Err(err) => {
+            warn!(error = %err, "Failed to parse client message");
+
+            let response =
+                ServerMessage::error("invalid_message", "Failed to parse message as valid JSON");
+            if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
+                warn!("Failed to send error response: {}", send_err);
+                return false;
+            }
+            true
+        }
+    }
 }
 
 /// Handle a binary WebSocket frame.

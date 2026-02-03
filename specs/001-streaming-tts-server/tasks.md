@@ -571,12 +571,12 @@
 - [x] T291 [GIT] Verify working tree is clean before starting Phase 13
 - [x] T292 [GIT] Pull and rebase on origin/main if needed (already up to date)
 - [x] T293 Create specs/001-streaming-tts-server/retro/P13.md for this phase
-- [ ] T294 [GIT] Commit: initialize phase 13 retro
+- [x] T294 [GIT] Commit: initialize phase 13 retro
 
 ### Timeouts
-- [ ] T295 [P] Implement idle connection timeout (5 min) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T296 [P] Implement synthesis timeout (30 sec) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T297 [P] Implement session init timeout (10 sec) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T295 [P] Implement idle connection timeout (5 min) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T296 [P] Implement synthesis timeout (30 sec) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T297 [P] Implement session init timeout (10 sec) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T298 [GIT] Commit: add timeouts
 
 ### Security

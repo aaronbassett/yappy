@@ -34,12 +34,26 @@ pub struct ServerConfig {
     pub log_level: String,
 
     /// Idle connection timeout in seconds (default: 300 = 5 minutes)
+    ///
+    /// Connection will be closed if no activity (messages, pings) is detected
+    /// for this duration. Set to 0 to disable (not recommended).
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
 
     /// Synthesis request timeout in seconds (default: 30)
+    ///
+    /// Maximum time allowed for synthesizing a single sentence. If synthesis
+    /// takes longer, a `synthesis_failed` error with `timeout` reason is sent.
     #[serde(default = "default_synthesis_timeout")]
     pub synthesis_timeout_secs: u64,
+
+    /// Session initialization timeout in seconds (default: 10)
+    ///
+    /// Maximum time allowed for the client to send `session.init` after
+    /// connecting. If exceeded, a `session_error` is sent and the connection
+    /// is closed.
+    #[serde(default = "default_session_init_timeout")]
+    pub session_init_timeout_secs: u64,
 
     /// Audio channel capacity for backpressure (default: 32)
     ///
@@ -70,6 +84,10 @@ const fn default_synthesis_timeout() -> u64 {
     30
 }
 
+const fn default_session_init_timeout() -> u64 {
+    10
+}
+
 const fn default_audio_channel_capacity() -> usize {
     32
 }
@@ -82,6 +100,7 @@ impl Default for ServerConfig {
             log_level: default_log_level(),
             idle_timeout_secs: default_idle_timeout(),
             synthesis_timeout_secs: default_synthesis_timeout(),
+            session_init_timeout_secs: default_session_init_timeout(),
             audio_channel_capacity: default_audio_channel_capacity(),
         }
     }
@@ -101,6 +120,11 @@ impl ServerConfig {
     /// Get synthesis timeout as Duration
     pub const fn synthesis_timeout(&self) -> Duration {
         Duration::from_secs(self.synthesis_timeout_secs)
+    }
+
+    /// Get session init timeout as Duration
+    pub const fn session_init_timeout(&self) -> Duration {
+        Duration::from_secs(self.session_init_timeout_secs)
     }
 }
 
@@ -291,6 +315,13 @@ impl Config {
         if self.server.synthesis_timeout_secs == 0 {
             return Err(ConfigValidationError::InvalidTimeout {
                 field: "synthesis_timeout_secs".to_string(),
+            });
+        }
+
+        // Session init timeout validation
+        if self.server.session_init_timeout_secs == 0 {
+            return Err(ConfigValidationError::InvalidTimeout {
+                field: "session_init_timeout_secs".to_string(),
             });
         }
 
@@ -607,6 +638,25 @@ mod tests {
             result,
             Err(ConfigValidationError::InvalidTimeout { ref field }) if field == "synthesis_timeout_secs"
         ));
+    }
+
+    #[test]
+    fn test_invalid_session_init_timeout_zero() {
+        let mut config = valid_config();
+        config.server.session_init_timeout_secs = 0;
+
+        let result = config.validate();
+        assert!(matches!(
+            result,
+            Err(ConfigValidationError::InvalidTimeout { ref field }) if field == "session_init_timeout_secs"
+        ));
+    }
+
+    #[test]
+    fn test_session_init_timeout_default() {
+        let config = ServerConfig::default();
+        assert_eq!(config.session_init_timeout_secs, 10);
+        assert_eq!(config.session_init_timeout().as_secs(), 10);
     }
 
     // ========== Provider Config Validation Tests ==========
