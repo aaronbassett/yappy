@@ -58,8 +58,9 @@ async fn test_nonfatal_error_mid_stream_allows_continuation() {
         .expect("Should initialize session");
 
     // Send text with one sentence (the provider fails mid-stream for every sentence)
+    // Note: SRX boundary detection requires following text to emit a sentence
     let text_msg = ClientMessage::Text {
-        content: "First sentence.".to_string(),
+        content: "First sentence. More text".to_string(),
     };
     send_message(&mut ws, &text_msg)
         .await
@@ -116,8 +117,11 @@ async fn test_nonfatal_error_mid_stream_allows_continuation() {
         .await
         .expect("Should finish session");
 
-    // The failed sentence still counts in the total
-    assert_eq!(total_sentences, 1, "Total sentences should be 1");
+    // Both the failed sentence and the flushed "More text" count in the total
+    assert_eq!(
+        total_sentences, 2,
+        "Total sentences should be 2 (1 failed + 1 flushed)"
+    );
 
     server.shutdown();
 }
@@ -147,8 +151,9 @@ async fn test_nonfatal_error_synthesis_init_failure() {
         .expect("Should initialize session");
 
     // Send text with a complete sentence
+    // Note: SRX boundary detection requires following text to emit a sentence
     let text_msg = ClientMessage::Text {
-        content: "Test sentence.".to_string(),
+        content: "Test sentence. More text".to_string(),
     };
     send_message(&mut ws, &text_msg)
         .await
@@ -185,13 +190,14 @@ async fn test_nonfatal_error_synthesis_init_failure() {
     }
 
     // Session should still be open - we can send more text and finish
+    // The trailing "More text" fragment is flushed as a 2nd sentence on text.done
     let (total_sentences, _, _) = finish_session(&mut ws)
         .await
         .expect("Should finish session");
 
     assert_eq!(
-        total_sentences, 1,
-        "Total sentences should include the failed one"
+        total_sentences, 2,
+        "Total sentences should be 2 (1 failed + 1 flushed)"
     );
 
     server.shutdown();
@@ -231,8 +237,9 @@ async fn test_rate_limit_error_is_nonfatal_with_retry_info() {
         .expect("Should initialize session");
 
     // Send text
+    // Note: SRX boundary detection requires following text to emit a sentence
     let text_msg = ClientMessage::Text {
-        content: "Test sentence.".to_string(),
+        content: "Test sentence. More text".to_string(),
     };
     send_message(&mut ws, &text_msg)
         .await
@@ -455,8 +462,9 @@ async fn test_error_message_format_nonfatal() {
         .expect("Should initialize session");
 
     // Send text to trigger error
+    // Note: SRX boundary detection requires following text to emit a sentence
     let text_msg = ClientMessage::Text {
-        content: "Test.".to_string(),
+        content: "Test. More text".to_string(),
     };
     send_message(&mut ws, &text_msg)
         .await
@@ -657,8 +665,9 @@ async fn test_multiple_sentences_with_errors_report_correct_indices() {
         .expect("Should initialize session");
 
     // Send text with multiple sentences
+    // Note: SRX boundary detection requires following text to emit a sentence
     let text_msg = ClientMessage::Text {
-        content: "First sentence. Second sentence. Third sentence.".to_string(),
+        content: "First sentence. Second sentence. Third sentence. More text".to_string(),
     };
     send_message(&mut ws, &text_msg)
         .await

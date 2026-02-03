@@ -46,7 +46,7 @@ audiopus = "0.2"
 mp3lame-encoder = "0.2"
 
 # Text processing
-# srx = "0.1"  # May need to verify crate availability
+srx = { version = "0.1", features = ["serde", "from_xml"] }
 
 # Utilities
 bytes = "1"

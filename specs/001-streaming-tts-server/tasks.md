@@ -396,10 +396,10 @@
 **Independent Test**: Stream text with abbreviations (Dr., Mrs.), decimals (3.14), ellipses - verify no premature breaks
 
 ### Phase Start
-- [ ] T201 [GIT] Verify working tree is clean before starting Phase 9
-- [ ] T202 [GIT] Pull and rebase on origin/main if needed
-- [ ] T203 [US7] Create specs/001-streaming-tts-server/retro/P9.md for this phase
-- [ ] T204 [GIT] Commit: initialize phase 9 retro
+- [x] T201 [GIT] Verify working tree is clean before starting Phase 9
+- [x] T202 [GIT] Pull and rebase on origin/main if needed
+- [x] T203 [US7] Create specs/001-streaming-tts-server/retro/P9.md for this phase
+- [x] T204 [GIT] Commit: initialize phase 9 retro
 
 ### Sentence Buffer Enhancement
 - [ ] T205 [US7] Implement SRX-based sentence segmentation with srx crate in crates/yappy-core/src/buffer.rs (use devs:rust-dev agent)

@@ -644,9 +644,13 @@ async fn test_websocket_full_tts_flow() {
         "Expected session.ready"
     );
 
-    // Step 2: Send text with a complete sentence
+    // Step 2: Send text with complete sentences
+    // Note: SRX-based sentence boundary detection needs trailing text after
+    // the last sentence to detect the boundary, so we add "More" at the end.
+    // This results in 3 segments: "Hello, world.", "This is a test.", and "More"
+    // (the last one is flushed when text.done is sent).
     let text_msg = ClientMessage::Text {
-        content: "Hello, world. This is a test.".to_string(),
+        content: "Hello, world. This is a test. More".to_string(),
     };
     ws.send(Message::Text(
         serde_json::to_string(&text_msg).unwrap().into(),
@@ -654,7 +658,8 @@ async fn test_websocket_full_tts_flow() {
     .await
     .unwrap();
 
-    // Step 3: Receive binary audio frames (2 sentences = 2 frames with default mock)
+    // Step 3: Receive binary audio frames for the first 2 sentences
+    // (the third "More" segment is still buffered)
     let mut audio_frames = Vec::new();
     for _ in 0..2 {
         let response = timeout(TEST_TIMEOUT, ws.next())
@@ -670,7 +675,7 @@ async fn test_websocket_full_tts_flow() {
         }
     }
 
-    // Verify we got 2 audio frames
+    // Verify we got 2 audio frames so far
     assert_eq!(audio_frames.len(), 2);
 
     // Verify binary frame format (12-byte header)
@@ -694,7 +699,7 @@ async fn test_websocket_full_tts_flow() {
         assert!(audio_data.iter().all(|&b| b == 0xAB), "Wrong audio data");
     }
 
-    // Step 4: Send text.done
+    // Step 4: Send text.done - this flushes the buffered "More" segment
     let done_msg = ClientMessage::TextDone;
     ws.send(Message::Text(
         serde_json::to_string(&done_msg).unwrap().into(),
@@ -702,7 +707,18 @@ async fn test_websocket_full_tts_flow() {
     .await
     .unwrap();
 
-    // Step 5: Receive audio.done
+    // Step 5: Receive audio for the flushed "More" segment
+    let response = timeout(TEST_TIMEOUT, ws.next())
+        .await
+        .expect("Timeout")
+        .expect("Stream closed")
+        .expect("WebSocket error");
+    assert!(
+        matches!(response, Message::Binary(_)),
+        "Expected binary for flushed content"
+    );
+
+    // Step 6: Receive audio.done
     let response = timeout(TEST_TIMEOUT, ws.next())
         .await
         .expect("Timeout")
@@ -717,9 +733,10 @@ async fn test_websocket_full_tts_flow() {
                 total_duration_ms,
                 total_bytes,
             } => {
-                assert_eq!(total_sentences, 2);
-                assert_eq!(total_duration_ms, 200); // 2 * 100ms
-                assert_eq!(total_bytes, 512); // 2 * 256 bytes
+                // 3 sentences: "Hello, world.", "This is a test.", "More" (flushed)
+                assert_eq!(total_sentences, 3);
+                assert_eq!(total_duration_ms, 300); // 3 * 100ms
+                assert_eq!(total_bytes, 768); // 3 * 256 bytes
             }
             _ => panic!("Expected AudioDone, got: {server_msg:?}"),
         }
@@ -840,8 +857,10 @@ async fn test_websocket_multiple_chunks_per_sentence() {
     let _ = timeout(TEST_TIMEOUT, ws.next()).await; // Consume session.ready
 
     // Send one complete sentence
+    // Note: SRX-based sentence boundary detection needs trailing text after
+    // the sentence to detect the boundary, so we add "More" at the end.
     let text_msg = ClientMessage::Text {
-        content: "One sentence.".to_string(),
+        content: "One sentence. More".to_string(),
     };
     ws.send(Message::Text(
         serde_json::to_string(&text_msg).unwrap().into(),
@@ -1115,8 +1134,10 @@ async fn test_websocket_binary_frame_roundtrip() {
     let _ = timeout(TEST_TIMEOUT, ws.next()).await; // Consume session.ready
 
     // Send text
+    // Note: SRX-based sentence boundary detection needs trailing text after
+    // the sentence to detect the boundary, so we add "More" at the end.
     let text_msg = ClientMessage::Text {
-        content: "Test sentence.".to_string(),
+        content: "Test sentence. More".to_string(),
     };
     ws.send(Message::Text(
         serde_json::to_string(&text_msg).unwrap().into(),
@@ -1200,10 +1221,14 @@ async fn test_websocket_multiple_text_messages() {
     .unwrap();
     let _ = timeout(TEST_TIMEOUT, ws.next()).await;
 
-    // Send multiple text messages
+    // Send multiple text messages in streaming style
+    // Note: SRX-based sentence boundary detection only emits sentences when
+    // followed by more text. We simulate streaming where each message's
+    // sentence is completed by the next message's text.
     for i in 0..3 {
+        // Send sentence with trailing text that will become next sentence
         let text_msg = ClientMessage::Text {
-            content: format!("Sentence {i}."),
+            content: format!("Sentence {i}. Next"),
         };
         ws.send(Message::Text(
             serde_json::to_string(&text_msg).unwrap().into(),
@@ -1211,7 +1236,7 @@ async fn test_websocket_multiple_text_messages() {
         .await
         .unwrap();
 
-        // Receive audio for each
+        // Receive audio for the completed sentence
         let response = timeout(TEST_TIMEOUT, ws.next())
             .await
             .expect("Timeout")
@@ -1273,8 +1298,10 @@ async fn test_websocket_audio_done_statistics() {
     let _ = timeout(TEST_TIMEOUT, ws.next()).await;
 
     // Send 2 complete sentences
+    // Note: SRX-based sentence boundary detection needs trailing text after
+    // the last sentence to detect the boundary, so we add "More" at the end.
     let text_msg = ClientMessage::Text {
-        content: "First sentence. Second sentence.".to_string(),
+        content: "First sentence. Second sentence. More".to_string(),
     };
     ws.send(Message::Text(
         serde_json::to_string(&text_msg).unwrap().into(),

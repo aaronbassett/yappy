@@ -30,5 +30,8 @@ tokio-util = { workspace = true }
 audiopus = { workspace = true }
 mp3lame-encoder = { workspace = true }
 
+# Text processing
+srx = { workspace = true }
+
 [lints]
 workspace = true

@@ -2087,8 +2087,10 @@ mod tests {
 
         sink.messages.clear();
 
-        // Send text with a complete sentence - should synthesize and send audio
-        let text_msg = r#"{"type":"text","content":"Hello world."}"#;
+        // Send text with a complete sentence followed by more text (streaming style).
+        // SRX-based sentence detection only emits sentences when followed by more text,
+        // which is correct for streaming TTS (we need to know the sentence is complete).
+        let text_msg = r#"{"type":"text","content":"Hello world. And more"}"#;
         let should_continue =
             handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
         assert!(should_continue);
@@ -2336,27 +2338,31 @@ mod tests {
         assert!(session.is_some());
         sink.messages.clear();
 
-        // Send text with two complete sentences
+        // Send text with two complete sentences.
+        // SRX detects "Hello world." as complete because it's followed by " Goodbye world."
+        // "Goodbye world." stays in buffer because there's no following text yet.
         let text_msg = r#"{"type":"text","content":"Hello world. Goodbye world."}"#;
         let should_continue =
             handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
         assert!(should_continue);
-        // 2 binary frames for the 2 complete sentences
-        assert_eq!(sink.messages.len(), 2);
+        // 1 binary frame for the first complete sentence
+        assert_eq!(sink.messages.len(), 1);
         assert!(matches!(sink.messages[0], Message::Binary(_)));
-        assert!(matches!(sink.messages[1], Message::Binary(_)));
 
         sink.messages.clear();
 
-        // Send text.done
+        // Send text.done - this flushes "Goodbye world." from buffer
         let done_text = r#"{"type":"text.done"}"#;
         let should_continue =
             handle_text_message(done_text, &mut sink, &mut session, &registry).await;
         assert!(should_continue);
 
-        // Verify audio.done was sent (no flushed content since buffer was empty)
-        assert_eq!(sink.messages.len(), 1);
-        if let Message::Text(json) = &sink.messages[0] {
+        // Verify flushed sentence audio + audio.done was sent
+        assert_eq!(sink.messages.len(), 2);
+        // First message should be binary audio for the flushed sentence
+        assert!(matches!(sink.messages[0], Message::Binary(_)));
+        // Second message should be audio.done
+        if let Message::Text(json) = &sink.messages[1] {
             let msg: ServerMessage = serde_json::from_str(json).unwrap();
             match msg {
                 ServerMessage::AudioDone {
@@ -2391,11 +2397,12 @@ mod tests {
         handle_text_message(init_text, &mut sink, &mut session, &registry).await;
         sink.messages.clear();
 
-        // Send text with one complete sentence
-        let text_msg = r#"{"type":"text","content":"Hello world."}"#;
+        // Send text with one complete sentence followed by more text (streaming style).
+        // SRX needs following text to detect sentence boundaries.
+        let text_msg = r#"{"type":"text","content":"Hello world. More text here"}"#;
         handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
 
-        // Should have 1 binary frame
+        // Should have 1 binary frame for "Hello world."
         assert_eq!(sink.messages.len(), 1);
 
         // Parse the binary frame
@@ -2434,8 +2441,10 @@ mod tests {
         handle_text_message(init_text, &mut sink, &mut session, &registry).await;
         sink.messages.clear();
 
-        // Send text with one complete sentence - synthesis will fail
-        let text_msg = r#"{"type":"text","content":"Hello world."}"#;
+        // Send text with one complete sentence followed by more text (streaming style).
+        // SRX needs following text to detect sentence boundaries.
+        // Synthesis will fail for "Hello world."
+        let text_msg = r#"{"type":"text","content":"Hello world. More text"}"#;
         let should_continue =
             handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
 
@@ -2477,8 +2486,11 @@ mod tests {
         handle_text_message(init_text, &mut sink, &mut session, &registry).await;
         sink.messages.clear();
 
-        // Send text with three complete sentences
-        let text_msg = r#"{"type":"text","content":"First. Second. Third."}"#;
+        // Send text with three complete sentences followed by more text.
+        // SRX only emits sentences when followed by more text (streaming behavior).
+        // "First." and "Second." are followed by more text, so they're emitted.
+        // "Third." is followed by " More" so it's also emitted.
+        let text_msg = r#"{"type":"text","content":"First. Second. Third. More"}"#;
         handle_text_message(text_msg, &mut sink, &mut session, &registry).await;
 
         // Should have 3 binary frames

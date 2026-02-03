@@ -149,14 +149,16 @@ async fn test_ws_full_tts_flow() {
     assert!(session_id.starts_with("ses_"));
 
     // Send text with complete sentences
+    // Note: SRX boundary detection only emits sentences when followed by more text,
+    // so we include a trailing fragment that will be flushed on text.done
     let text_msg = ClientMessage::Text {
-        content: "Hello world. This is a test.".to_string(),
+        content: "Hello world. This is a test. And more".to_string(),
     };
     send_message(&mut ws, &text_msg)
         .await
         .expect("Should send text");
 
-    // Collect audio chunks (expect 2 for 2 sentences)
+    // Collect audio chunks (expect 2 for 2 complete sentences before text.done)
     let mut audio_chunks = Vec::new();
     for _ in 0..10 {
         match timeout(Duration::from_millis(500), ws.next()).await {
@@ -181,11 +183,15 @@ async fn test_ws_full_tts_flow() {
     }
 
     // Send text.done and wait for audio.done
+    // The trailing "And more" fragment is flushed as a 3rd sentence on text.done
     let (total_sentences, total_duration_ms, total_bytes) = finish_session(&mut ws)
         .await
         .expect("Should finish session");
 
-    assert_eq!(total_sentences, 2, "Should have 2 sentences");
+    assert_eq!(
+        total_sentences, 3,
+        "Should have 3 sentences (2 complete + 1 flushed)"
+    );
     assert!(total_duration_ms > 0, "Duration should be positive");
     assert!(total_bytes > 0, "Bytes should be positive");
 
@@ -301,7 +307,9 @@ async fn test_ws_multiple_text_messages() {
     send_message(
         &mut ws,
         &ClientMessage::Text {
-            content: "sentence.".to_string(),
+            // Note: SRX boundary detection requires following text to emit a sentence.
+            // Adding trailing text ensures "Second sentence." is detected before text.done
+            content: "sentence. And more".to_string(),
         },
     )
     .await
@@ -316,14 +324,18 @@ async fn test_ws_multiple_text_messages() {
         }
     }
 
-    // Should have 2 chunks for 2 sentences
+    // Should have 2 chunks for 2 complete sentences (first and second)
+    // The trailing "And more" will be flushed on text.done as a 3rd sentence
     assert_eq!(audio_count, 2, "Should have 2 audio chunks");
 
     // Finish session
     let (total_sentences, _, _) = finish_session(&mut ws)
         .await
         .expect("Should finish session");
-    assert_eq!(total_sentences, 2);
+    assert_eq!(
+        total_sentences, 3,
+        "Should have 3 sentences (2 complete + 1 flushed)"
+    );
 
     server.shutdown();
 }
@@ -607,8 +619,9 @@ async fn test_ws_synthesis_error() {
         .expect("Should initialize session");
 
     // Send text with a complete sentence
+    // Note: SRX boundary detection requires following text to emit a sentence
     let text_msg = ClientMessage::Text {
-        content: "Hello world.".to_string(),
+        content: "Hello world. More text".to_string(),
     };
     send_message(&mut ws, &text_msg)
         .await
@@ -638,8 +651,11 @@ async fn test_ws_synthesis_error() {
         .await
         .expect("Should finish session");
 
-    // The failed sentence still counts in the total
-    assert_eq!(total_sentences, 1);
+    // Both the failed sentence and the flushed "More text" count in the total
+    assert_eq!(
+        total_sentences, 2,
+        "Should have 2 sentences (1 failed + 1 flushed)"
+    );
 
     server.shutdown();
 }
@@ -668,8 +684,9 @@ async fn test_ws_multiple_chunks_per_sentence() {
         .expect("Should initialize session");
 
     // Send text with one sentence
+    // Note: SRX boundary detection requires following text to emit a sentence
     let text_msg = ClientMessage::Text {
-        content: "Single sentence.".to_string(),
+        content: "Single sentence. More text".to_string(),
     };
     send_message(&mut ws, &text_msg)
         .await
@@ -702,13 +719,17 @@ async fn test_ws_multiple_chunks_per_sentence() {
     }
 
     // Finish session
+    // The trailing "More text" fragment is flushed as a 2nd sentence on text.done
     let (total_sentences, total_duration_ms, total_bytes) = finish_session(&mut ws)
         .await
         .expect("Should finish session");
 
-    assert_eq!(total_sentences, 1);
-    assert_eq!(total_duration_ms, 150); // 3 chunks * 50ms
-    assert_eq!(total_bytes, 384); // 3 chunks * 128 bytes
+    assert_eq!(
+        total_sentences, 2,
+        "Should have 2 sentences (1 complete + 1 flushed)"
+    );
+    assert_eq!(total_duration_ms, 300); // 2 sentences * 3 chunks * 50ms
+    assert_eq!(total_bytes, 768); // 2 sentences * 3 chunks * 128 bytes
 
     server.shutdown();
 }
@@ -766,10 +787,11 @@ async fn test_ws_concurrent_connections() {
     assert_ne!(session_id_1, session_id_2);
 
     // Both should be able to send text and receive audio
+    // Note: SRX boundary detection requires following text to emit a sentence
     send_message(
         &mut ws1,
         &ClientMessage::Text {
-            content: "Client 1.".to_string(),
+            content: "Client 1. More text".to_string(),
         },
     )
     .await
@@ -778,7 +800,7 @@ async fn test_ws_concurrent_connections() {
     send_message(
         &mut ws2,
         &ClientMessage::Text {
-            content: "Client 2.".to_string(),
+            content: "Client 2. More text".to_string(),
         },
     )
     .await
