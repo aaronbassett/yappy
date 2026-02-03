@@ -318,11 +318,11 @@
 - [x] T160 [GIT] Verify working tree is clean before starting Phase 7
 - [x] T161 [GIT] Pull and rebase on origin/main if needed
 - [x] T162 [US5] Create specs/001-streaming-tts-server/retro/P7.md for this phase
-- [ ] T163 [GIT] Commit: initialize phase 7 retro
+- [x] T163 [GIT] Commit: initialize phase 7 retro
 
 ### Audio Transcoding
-- [ ] T164 [P] [US5] Implement Opus encoder wrapper using audiopus in crates/yappy-core/src/transcode.rs (use devs:rust-dev agent)
-- [ ] T165 [P] [US5] Implement MP3 encoder wrapper using mp3lame-encoder in crates/yappy-core/src/transcode.rs (use devs:rust-dev agent)
+- [x] T164 [P] [US5] Implement Opus encoder wrapper using audiopus in crates/yappy-core/src/transcode.rs (use devs:rust-dev agent)
+- [x] T165 [P] [US5] Implement MP3 encoder wrapper using mp3lame-encoder in crates/yappy-core/src/transcode.rs (use devs:rust-dev agent)
 - [ ] T166 [GIT] Commit: add audio encoders
 - [ ] T167 [US5] Implement format negotiation in session.init (check provider support, transcode if needed) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T168 [GIT] Commit: add format negotiation

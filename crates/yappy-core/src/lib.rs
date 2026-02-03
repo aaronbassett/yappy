@@ -30,6 +30,9 @@ pub mod error;
 /// WebSocket message types
 pub mod message;
 
+/// Audio transcoding module
+pub mod transcode;
+
 // Re-exports for convenience
 pub use audio::{AudioChunk, AudioCodec, AudioFormat};
 pub use buffer::SentenceBuffer;
@@ -38,3 +41,7 @@ pub use error::{ErrorResponse, ProviderError, SessionError};
 pub use message::{ClientMessage, ServerMessage};
 pub use provider::{ProviderMetadata, ProviderStatus, TtsProvider};
 pub use session::{CodeBlockMode, Session, SessionId, SessionState, VoiceConfig};
+pub use transcode::{
+    f32_to_i16, i16_to_bytes_le, Mp3Encoder, Mp3Quality, OpusEncoder, TranscodeCapability,
+    TranscodeError, Transcoder,
+};
