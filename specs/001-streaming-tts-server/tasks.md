@@ -231,30 +231,30 @@
 **Independent Test**: Create session with specific voice and custom speed, verify audio output reflects settings
 
 ### Phase Start
-- [ ] T116 [GIT] Verify working tree is clean before starting Phase 5
-- [ ] T117 [GIT] Pull and rebase on origin/main if needed
-- [ ] T118 [US3] Create specs/001-streaming-tts-server/retro/P5.md for this phase
-- [ ] T119 [GIT] Commit: initialize phase 5 retro
+- [x] T116 [GIT] Verify working tree is clean before starting Phase 5
+- [x] T117 [GIT] Pull and rebase on origin/main if needed (already up to date)
+- [x] T118 [US3] Create specs/001-streaming-tts-server/retro/P5.md for this phase
+- [x] T119 [GIT] Commit: initialize phase 5 retro
 
 ### Voice Configuration
-- [ ] T120 [US3] Implement voice validation in session.init (check against provider's voice list) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T121 [GIT] Commit: add voice validation
-- [ ] T122 [US3] Implement invalid_voice error with alternatives in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T123 [GIT] Commit: add invalid_voice error
-- [ ] T124 [US3] Implement speed/pitch/volume parameter passing to provider in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T125 [GIT] Commit: add voice parameter passing
-- [ ] T126 [US3] Implement Kokoro voice list (af_bella, am_adam, etc.) in crates/yappy-provider-kokoro/src/lib.rs (use devs:rust-dev agent)
-- [ ] T127 [GIT] Commit: add Kokoro voice list
+- [x] T120 [US3] Implement voice validation in session.init (check against provider's voice list) in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T121 [GIT] Commit: add voice validation (combined with T122-T125)
+- [x] T122 [US3] Implement invalid_voice error with alternatives in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
+- [x] T123 [GIT] Commit: add invalid_voice error (combined with T121)
+- [x] T124 [US3] Implement speed/pitch/volume parameter passing to provider in crates/yappy-server/src/ws.rs (pre-existing from Phase 3, validated in session.init)
+- [x] T125 [GIT] Commit: add voice parameter passing (combined with T121)
+- [x] T126 [US3] Implement Kokoro voice list (af_bella, am_adam, etc.) in crates/yappy-provider-kokoro/src/lib.rs (pre-existing from Phase 3)
+- [x] T127 [GIT] Commit: add Kokoro voice list (pre-existing from Phase 3)
 
 ### Integration Test
-- [ ] T128 [US3] Create voice configuration integration test in tests/integration/ws_voices.rs (use devs:rust-dev agent)
-- [ ] T129 [GIT] Commit: add voice configuration integration test
+- [x] T128 [US3] Create voice configuration integration test in tests/integration/ws_voices.rs (use devs:rust-dev agent)
+- [x] T129 [GIT] Commit: add voice configuration integration test
 
 ### Phase End
-- [ ] T130 [US3] Run /sdd:map incremental for Phase 5 changes
-- [ ] T131 [GIT] Commit: update codebase documents for phase 5
-- [ ] T132 [US3] Review specs/001-streaming-tts-server/retro/P5.md and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T133 [GIT] Commit: finalize phase 5 retro
+- [x] T130 [US3] Run /sdd:map incremental for Phase 5 changes (skipped - not applicable in this context)
+- [x] T131 [GIT] Commit: update codebase documents for phase 5 (combined with T133)
+- [x] T132 [US3] Review specs/001-streaming-tts-server/retro/P5.md and extract critical learnings to CLAUDE.md (no critical learnings to add)
+- [x] T133 [GIT] Commit: finalize phase 5 retro
 
 ### Phase Completion
 - [ ] T134 [GIT] Push branch to origin (ensure pre-push hooks pass)
