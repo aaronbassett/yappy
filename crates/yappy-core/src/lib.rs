@@ -33,7 +33,7 @@ pub mod message;
 // Re-exports for convenience
 pub use audio::{AudioChunk, AudioCodec, AudioFormat};
 pub use buffer::SentenceBuffer;
-pub use config::Config;
+pub use config::{Config, ConfigValidationError};
 pub use error::{ErrorResponse, ProviderError, SessionError};
 pub use message::{ClientMessage, ServerMessage};
 pub use provider::{ProviderMetadata, ProviderStatus, TtsProvider};

@@ -91,14 +91,14 @@
 - [x] T038 Implement AppState with provider registry in crates/yappy-server/src/state.rs (use devs:rust-dev agent)
 - [x] T039 [GIT] Commit: add AppState
 - [x] T040 Implement Axum router setup in crates/yappy-server/src/app.rs (use devs:rust-dev agent)
-- [ ] T041 [GIT] Commit: add Axum router
-- [ ] T042 Implement CLI argument parsing in crates/yappy-server/src/main.rs (use devs:rust-dev agent)
-- [ ] T043 [GIT] Commit: add CLI parsing
-- [ ] T044a Implement config file TOML parsing and environment variable expansion in crates/yappy-server/src/main.rs (use devs:rust-dev agent)
-- [ ] T044b Implement config validation (provider compatibility, required fields, value ranges) in crates/yappy-server/src/main.rs (use devs:rust-dev agent)
+- [x] T041 [GIT] Commit: add Axum router
+- [x] T042 Implement CLI argument parsing in crates/yappy-server/src/main.rs (pre-existing from Phase 1)
+- [x] T043 [GIT] Commit: add CLI parsing (pre-existing from Phase 1)
+- [x] T044a Implement config file TOML parsing and environment variable expansion in crates/yappy-server/src/main.rs (pre-existing from Phase 1)
+- [x] T044b Implement config validation (provider compatibility, required fields, value ranges) in crates/yappy-core/src/config.rs (use devs:rust-dev agent)
 - [ ] T045 [GIT] Commit: add config loading and validation
-- [ ] T046 Implement tracing/logging setup in crates/yappy-server/src/main.rs (use devs:rust-dev agent)
-- [ ] T047 [GIT] Commit: add tracing setup
+- [x] T046 Implement tracing/logging setup in crates/yappy-server/src/main.rs (pre-existing from Phase 1)
+- [x] T047 [GIT] Commit: add tracing setup (pre-existing from Phase 1)
 
 ### Phase End
 - [ ] T048 Run /sdd:map incremental for Phase 2 changes
