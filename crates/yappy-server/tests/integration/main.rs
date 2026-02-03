@@ -5,8 +5,10 @@
 
 mod common;
 mod health_check;
+mod ws_backpressure;
 mod ws_basic;
 mod ws_buffer;
+mod ws_concurrent;
 mod ws_errors;
 mod ws_formats;
 mod ws_providers;

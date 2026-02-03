@@ -31,6 +31,17 @@ pub enum MockSynthesisMode {
         /// Bytes of audio data per chunk
         chunk_bytes: usize,
     },
+    /// Return many chunks with a delay between each (for backpressure testing)
+    SuccessWithDelay {
+        /// Number of chunks per sentence
+        chunks_per_sentence: usize,
+        /// Duration in ms for each chunk
+        chunk_duration_ms: u32,
+        /// Bytes of audio data per chunk
+        chunk_bytes: usize,
+        /// Delay between emitting each chunk (simulates real synthesis time)
+        inter_chunk_delay_ms: u64,
+    },
     /// Return an error during synthesis initialization
     FailInit {
         /// Error message
@@ -246,6 +257,44 @@ impl TtsProvider for MockTtsProvider {
                 }
 
                 Ok(Box::pin(stream::iter(items)))
+            }
+            MockSynthesisMode::SuccessWithDelay {
+                chunks_per_sentence,
+                chunk_duration_ms,
+                chunk_bytes,
+                inter_chunk_delay_ms,
+            } => {
+                // Create a stream that emits chunks with delays between them
+                let chunks_per_sentence = *chunks_per_sentence;
+                let chunk_duration_ms = *chunk_duration_ms;
+                let chunk_bytes = *chunk_bytes;
+                let inter_chunk_delay_ms = *inter_chunk_delay_ms;
+
+                let stream = async_stream::stream! {
+                    for i in 0..chunks_per_sentence {
+                        // Add delay before emitting chunk (except first)
+                        if i > 0 && inter_chunk_delay_ms > 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(inter_chunk_delay_ms)).await;
+                        }
+
+                        let mut data = vec![0xBB; chunk_bytes];
+                        if chunk_bytes > 0 {
+                            data[0] = 0xBB; // Different marker for delayed chunks
+                        }
+                        if chunk_bytes > 1 {
+                            data[1] = i as u8;
+                        }
+
+                        yield Ok(AudioChunk::new(
+                            i as u32,
+                            0,
+                            Bytes::from(data),
+                            chunk_duration_ms,
+                        ));
+                    }
+                };
+
+                Ok(Box::pin(stream))
             }
             MockSynthesisMode::FailInit { error } => Err(ProviderError::SynthesisFailed {
                 message: error.clone(),

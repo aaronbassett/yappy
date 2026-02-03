@@ -73,6 +73,8 @@ pub struct TestServerBuilder {
     registry: ProviderRegistry,
     /// Default provider ID
     default_provider: Option<String>,
+    /// Audio channel capacity for backpressure (None = use default)
+    audio_channel_capacity: Option<usize>,
 }
 
 impl Default for TestServerBuilder {
@@ -87,7 +89,17 @@ impl TestServerBuilder {
         Self {
             registry: ProviderRegistry::new(),
             default_provider: None,
+            audio_channel_capacity: None,
         }
+    }
+
+    /// Set the audio channel capacity for backpressure testing
+    ///
+    /// A smaller capacity (e.g., 4-8) makes it easier to trigger backpressure
+    /// in integration tests without generating large amounts of data.
+    pub fn with_audio_channel_capacity(mut self, capacity: usize) -> Self {
+        self.audio_channel_capacity = Some(capacity);
+        self
     }
 
     /// Add a mock provider with default configuration
@@ -175,8 +187,13 @@ impl TestServerBuilder {
         // Use a long flush timeout (5 seconds) to prevent auto-flush during tests,
         // preserving the original test semantics where buffers only flush on text.done.
         // Tests that want to test flush timeout behavior should use a custom config.
+        let mut server_config = ServerConfig::default();
+        if let Some(capacity) = self.audio_channel_capacity {
+            server_config.audio_channel_capacity = capacity;
+        }
+
         let config = Config {
-            server: ServerConfig::default(),
+            server: server_config,
             providers: ProvidersConfig {
                 default: self.default_provider.clone().unwrap_or_default(),
                 openai: None,
