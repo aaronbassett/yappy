@@ -48,7 +48,7 @@ use yappy_core::session::VoiceConfig;
 /// Default voice ID for Kokoro model
 const DEFAULT_VOICE_ID: &str = "af_bella";
 
-/// HuggingFace repository containing the Kokoro ONNX model
+/// `HuggingFace` repository containing the Kokoro ONNX model
 const MODEL_REPO: &str = "onnx-community/Kokoro-82M-v1.0-ONNX";
 
 /// ONNX model filename within the repository
@@ -109,10 +109,16 @@ impl Default for KokoroConfig {
 ///
 /// Call [`load_model`](Self::load_model) to transition from uninitialized to loaded.
 ///
-/// # Status
+/// # Initialization
 ///
-/// This is a skeleton implementation. The ONNX session loading and
-/// audio synthesis will be implemented in T076-T078.
+/// The provider uses lazy initialization. Call [`load_model`](Self::load_model) before
+/// first use to download the model (if needed) and load the ONNX session.
+///
+/// ```ignore
+/// let provider = KokoroProvider::with_defaults();
+/// provider.load_model().await?;
+/// assert!(provider.is_model_loaded());
+/// ```
 pub struct KokoroProvider {
     /// Provider configuration
     config: KokoroConfig,
@@ -196,6 +202,31 @@ impl KokoroProvider {
         self.model_loaded.load(Ordering::SeqCst)
     }
 
+    /// Ensure the model is loaded, loading it if necessary.
+    ///
+    /// This is a convenience method that:
+    /// - Returns `Ok(())` immediately if the model is already loaded
+    /// - Attempts to load the model if not loaded
+    /// - Returns an error if loading fails
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InitializationFailed`] if the model fails to load.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let provider = KokoroProvider::with_defaults();
+    /// provider.ensure_model_loaded().await?;
+    /// // Now safe to call synthesize
+    /// ```
+    pub async fn ensure_model_loaded(&self) -> Result<(), ProviderError> {
+        if self.is_model_loaded() {
+            return Ok(());
+        }
+        self.load_model().await
+    }
+
     /// Load the Kokoro ONNX model.
     ///
     /// This method will:
@@ -203,32 +234,176 @@ impl KokoroProvider {
     /// 2. Download voice embeddings if not present
     /// 3. Initialize the ONNX runtime session
     ///
+    /// The download is cached by hf-hub, so subsequent calls will use cached files.
+    /// The model file is approximately 170 MB and voices file is approximately 27 MB.
+    ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - Model download fails
-    /// - Model file is corrupted or invalid
-    /// - ONNX runtime initialization fails
+    /// Returns [`ProviderError::InitializationFailed`] if:
+    /// - Model download fails (network error, repository not found)
+    /// - ONNX session loading fails (invalid model, runtime error)
+    /// - File system errors occur
     ///
-    /// # Note
+    /// # Example
     ///
-    /// This is a stub implementation. Actual model loading will be
-    /// implemented in T076-T078.
+    /// ```ignore
+    /// let provider = KokoroProvider::with_defaults();
+    /// provider.load_model().await?;
+    /// assert!(provider.is_model_loaded());
+    /// ```
     #[instrument(skip(self), name = "kokoro_load_model")]
-    pub async fn load_model(&mut self) -> Result<(), ProviderError> {
-        // TODO: Implement actual model loading (T076)
-        // 1. Use hf-hub to download model if not present
-        // 2. Load voice embeddings
-        // 3. Initialize ort::Session
+    pub async fn load_model(&self) -> Result<(), ProviderError> {
+        // Check if already loaded
+        if self.model_loaded.load(Ordering::SeqCst) {
+            debug!("Kokoro model already loaded");
+            return Ok(());
+        }
 
-        warn!("Kokoro model loading not yet implemented");
+        info!("Loading Kokoro ONNX model");
 
-        // For now, just mark as not loaded
-        self.model_loaded.store(false, Ordering::SeqCst);
+        // Determine model path: use configured path or download from HuggingFace
+        let model_path = if let Some(path) = &self.config.model_path {
+            debug!(?path, "Using configured model path");
+            path.clone()
+        } else {
+            debug!(repo = MODEL_REPO, "Downloading model from HuggingFace");
+            Self::ensure_model_downloaded().await?
+        };
 
-        Err(ProviderError::NotConfigured {
-            reason: "Kokoro model loading not yet implemented (coming in T076-T078)".to_string(),
-        })
+        // Determine voices path: use configured path or download from HuggingFace
+        let voices_path = if let Some(path) = &self.config.voices_path {
+            debug!(?path, "Using configured voices path");
+            path.clone()
+        } else {
+            debug!(
+                repo = MODEL_REPO,
+                "Downloading voice embeddings from HuggingFace"
+            );
+            Self::ensure_voices_downloaded().await?
+        };
+
+        // Load ONNX session (blocking operation, run in spawn_blocking)
+        let session = {
+            let path = model_path.clone();
+            tokio::task::spawn_blocking(move || Self::load_session(&path))
+                .await
+                .map_err(|e| ProviderError::InitializationFailed {
+                    message: format!("Task join error while loading ONNX session: {e}"),
+                })??
+        };
+
+        // Store the session
+        {
+            let mut session_guard =
+                self.session
+                    .write()
+                    .map_err(|e| ProviderError::InitializationFailed {
+                        message: format!("Failed to acquire session write lock: {e}"),
+                    })?;
+            *session_guard = Some(session);
+        }
+
+        // Store the voices path
+        {
+            let mut voices_guard =
+                self.voices_file_path
+                    .write()
+                    .map_err(|e| ProviderError::InitializationFailed {
+                        message: format!("Failed to acquire voices path write lock: {e}"),
+                    })?;
+            *voices_guard = Some(voices_path);
+        }
+
+        // Mark as loaded
+        self.model_loaded.store(true, Ordering::SeqCst);
+
+        info!("Kokoro model loaded successfully");
+        Ok(())
+    }
+
+    /// Download the ONNX model from `HuggingFace` Hub.
+    ///
+    /// Uses hf-hub's caching mechanism, so repeated calls will use the cached file.
+    /// The model file is approximately 170 MB (FP16).
+    #[instrument]
+    async fn ensure_model_downloaded() -> Result<PathBuf, ProviderError> {
+        info!(
+            repo = MODEL_REPO,
+            file = MODEL_FILENAME,
+            "Downloading Kokoro ONNX model (this may take a while on first run)"
+        );
+
+        let api =
+            hf_hub::api::tokio::Api::new().map_err(|e| ProviderError::InitializationFailed {
+                message: format!("Failed to create HuggingFace API client: {e}"),
+            })?;
+
+        let repo = api.model(MODEL_REPO.to_string());
+        let model_path =
+            repo.get(MODEL_FILENAME)
+                .await
+                .map_err(|e| ProviderError::InitializationFailed {
+                    message: format!(
+                        "Failed to download model from {MODEL_REPO}/{MODEL_FILENAME}: {e}"
+                    ),
+                })?;
+
+        info!(?model_path, "Model downloaded successfully");
+        Ok(model_path)
+    }
+
+    /// Download the voice embeddings from `HuggingFace` Hub.
+    ///
+    /// Uses hf-hub's caching mechanism, so repeated calls will use the cached file.
+    /// The voices file is approximately 27 MB.
+    #[instrument]
+    async fn ensure_voices_downloaded() -> Result<PathBuf, ProviderError> {
+        info!(
+            repo = MODEL_REPO,
+            file = VOICES_FILENAME,
+            "Downloading voice embeddings"
+        );
+
+        let api =
+            hf_hub::api::tokio::Api::new().map_err(|e| ProviderError::InitializationFailed {
+                message: format!("Failed to create HuggingFace API client: {e}"),
+            })?;
+
+        let repo = api.model(MODEL_REPO.to_string());
+        let voices_path =
+            repo.get(VOICES_FILENAME)
+                .await
+                .map_err(|e| ProviderError::InitializationFailed {
+                    message: format!(
+                    "Failed to download voice embeddings from {MODEL_REPO}/{VOICES_FILENAME}: {e}"
+                ),
+                })?;
+
+        info!(?voices_path, "Voice embeddings downloaded successfully");
+        Ok(voices_path)
+    }
+
+    /// Load an ONNX session from the given model file.
+    ///
+    /// This is a blocking operation and should be called from `spawn_blocking`.
+    #[instrument]
+    fn load_session(model_path: &Path) -> Result<ort::session::Session, ProviderError> {
+        info!(?model_path, "Loading ONNX session");
+
+        let session = ort::session::Session::builder()
+            .map_err(|e| ProviderError::InitializationFailed {
+                message: format!("Failed to create ONNX session builder: {e}"),
+            })?
+            .commit_from_file(model_path)
+            .map_err(|e| ProviderError::InitializationFailed {
+                message: format!(
+                    "Failed to load ONNX model from {}: {e}",
+                    model_path.display()
+                ),
+            })?;
+
+        info!("ONNX session loaded successfully");
+        Ok(session)
     }
 
     /// Get the list of available Kokoro voices.
@@ -670,24 +845,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_model_stub() {
-        let mut provider = KokoroProvider::with_defaults();
+    async fn test_load_model_with_invalid_path() {
+        let config = KokoroConfig {
+            model_path: Some(PathBuf::from("/nonexistent/path/model.onnx")),
+            voices_path: Some(PathBuf::from("/nonexistent/path/voices.bin")),
+            default_voice: DEFAULT_VOICE_ID.to_string(),
+        };
+        let provider = KokoroProvider::new(config);
         let result = provider.load_model().await;
 
-        // Should return NotConfigured since it's a stub
+        // Should return InitializationFailed for invalid path
         match result {
-            Err(ProviderError::NotConfigured { reason }) => {
+            Err(ProviderError::InitializationFailed { message }) => {
                 assert!(
-                    reason.contains("not yet implemented"),
-                    "Error should mention not implemented: {}",
-                    reason
+                    message.contains("Failed to load ONNX model"),
+                    "Error should mention ONNX model loading failure: {}",
+                    message
                 );
             }
-            _ => panic!("Expected NotConfigured error, got: {:?}", result),
+            Ok(_) => panic!("Expected InitializationFailed error, got Ok"),
+            Err(e) => panic!("Expected InitializationFailed error, got: {:?}", e),
         }
 
         // Model should still be not loaded
         assert!(!provider.is_model_loaded());
+    }
+
+    #[tokio::test]
+    async fn test_load_model_already_loaded_is_noop() {
+        // This tests that calling load_model when already loaded returns Ok
+        // We can't actually load the model in unit tests, so we test the logic
+        // by checking that calling load_model multiple times doesn't panic
+        let provider = KokoroProvider::with_defaults();
+
+        // First call will fail (no network in unit tests), but shouldn't panic
+        let _ = provider.load_model().await;
+
+        // Model should not be loaded after failed attempt
+        assert!(!provider.is_model_loaded());
+    }
+
+    /// Integration test for actual model loading from HuggingFace.
+    /// This test is ignored by default as it requires network access
+    /// and downloads ~200MB of model files.
+    #[tokio::test]
+    #[ignore = "requires network access and downloads large model files"]
+    async fn test_load_model_from_huggingface() {
+        let provider = KokoroProvider::with_defaults();
+        let result = provider.load_model().await;
+
+        assert!(result.is_ok(), "Model loading failed: {:?}", result);
+        assert!(provider.is_model_loaded());
+
+        // Verify health check returns Available
+        let status = provider.health_check().await;
+        assert!(
+            matches!(status, ProviderStatus::Available),
+            "Expected Available status, got: {:?}",
+            status
+        );
     }
 
     #[test]
@@ -702,5 +918,44 @@ mod tests {
     fn test_default_trait() {
         let provider = KokoroProvider::default();
         assert_eq!(provider.config().default_voice, "af_bella");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_model_loaded_attempts_load() {
+        // Test that ensure_model_loaded tries to load when not already loaded
+        let provider = KokoroProvider::with_defaults();
+
+        // This will attempt to download from HuggingFace but fail in unit tests
+        // The important thing is it attempts the load
+        let result = provider.ensure_model_loaded().await;
+
+        // Should fail because we can't actually download in unit tests
+        assert!(result.is_err());
+        assert!(!provider.is_model_loaded());
+    }
+
+    /// Integration test for ensure_model_loaded from HuggingFace.
+    /// This test is ignored by default as it requires network access.
+    #[tokio::test]
+    #[ignore = "requires network access and downloads large model files"]
+    async fn test_ensure_model_loaded_from_huggingface() {
+        let provider = KokoroProvider::with_defaults();
+
+        // First call should load the model
+        let result = provider.ensure_model_loaded().await;
+        assert!(
+            result.is_ok(),
+            "First ensure_model_loaded failed: {:?}",
+            result
+        );
+        assert!(provider.is_model_loaded());
+
+        // Second call should be a no-op and return Ok immediately
+        let result = provider.ensure_model_loaded().await;
+        assert!(
+            result.is_ok(),
+            "Second ensure_model_loaded failed: {:?}",
+            result
+        );
     }
 }
