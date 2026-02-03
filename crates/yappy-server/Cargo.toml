@@ -40,6 +40,9 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 
 [dev-dependencies]
 async-trait = { workspace = true }
+tokio-tungstenite = { workspace = true }
+bytes = { workspace = true }
+futures-util = "0.3"
 
 [features]
 default = ["kokoro"]
