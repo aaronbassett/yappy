@@ -1326,7 +1326,7 @@ mod tests {
     /// Default capacity for backpressure in tests
     const TEST_BACKPRESSURE_CAPACITY: usize = 32;
 
-    /// Wrapper for BackpressureSender that provides convenient access to messages for testing.
+    /// Wrapper for `BackpressureSender` that provides convenient access to messages for testing.
     struct TestSender {
         bp_sender: BackpressureSender<MockSink>,
     }

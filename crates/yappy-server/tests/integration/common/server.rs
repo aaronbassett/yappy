@@ -97,7 +97,7 @@ impl TestServerBuilder {
     ///
     /// A smaller capacity (e.g., 4-8) makes it easier to trigger backpressure
     /// in integration tests without generating large amounts of data.
-    pub fn with_audio_channel_capacity(mut self, capacity: usize) -> Self {
+    pub const fn with_audio_channel_capacity(mut self, capacity: usize) -> Self {
         self.audio_channel_capacity = Some(capacity);
         self
     }

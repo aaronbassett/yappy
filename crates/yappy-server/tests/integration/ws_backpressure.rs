@@ -47,6 +47,7 @@ const BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(30);
 /// 2. All audio frames are eventually delivered
 /// 3. Session completes successfully
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn test_slow_consumer_receives_all_frames() {
     // Create a provider that generates many chunks per sentence
     let provider =
@@ -144,16 +145,14 @@ async fn test_slow_consumer_receives_all_frames() {
                 }
             }
             Ok(Some(Ok(Message::Text(text)))) => {
-                if let Ok(msg) = serde_json::from_str::<ServerMessage>(&text) {
-                    if let ServerMessage::AudioDone {
-                        total_sentences: ts,
-                        ..
-                    } = msg
-                    {
-                        total_sentences = ts;
-                        audio_done_received = true;
-                        break;
-                    }
+                if let Ok(ServerMessage::AudioDone {
+                    total_sentences: ts,
+                    ..
+                }) = serde_json::from_str::<ServerMessage>(&text)
+                {
+                    total_sentences = ts;
+                    audio_done_received = true;
+                    break;
                 }
             }
             Ok(Some(Ok(
@@ -161,9 +160,9 @@ async fn test_slow_consumer_receives_all_frames() {
             ))) => {
                 // Ignore control frames
             }
-            Ok(Some(Err(e))) => panic!("WebSocket error: {}", e),
+            Ok(Some(Err(e))) => panic!("WebSocket error: {e}"),
             Ok(None) => panic!("Connection closed before audio.done"),
-            Err(_) => panic!("Timeout waiting for audio.done"),
+            Err(elapsed) => panic!("Timeout waiting for audio.done after {elapsed:?}"),
         }
     }
 
