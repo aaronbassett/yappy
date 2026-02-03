@@ -276,20 +276,20 @@
 - [x] T138 [GIT] Verify working tree is clean before starting Phase 6
 - [x] T139 [GIT] Pull and rebase on origin/main if needed (already up to date)
 - [x] T140 [US4] Create specs/001-streaming-tts-server/retro/P6.md for this phase
-- [ ] T141 [GIT] Commit: initialize phase 6 retro
+- [x] T141 [GIT] Commit: initialize phase 6 retro
 
 ### Health Endpoint
-- [ ] T142 [US4] Implement GET /health endpoint in crates/yappy-server/src/handlers/health.rs (use devs:rust-dev agent)
-- [ ] T143 [GIT] Commit: add /health endpoint
-- [ ] T144 [US4] Implement uptime tracking in AppState in crates/yappy-server/src/state.rs (use devs:rust-dev agent)
-- [ ] T145 [GIT] Commit: add uptime tracking
-- [ ] T146 [US4] Implement per-provider health_check() calls in health endpoint in crates/yappy-server/src/handlers/health.rs (use devs:rust-dev agent)
-- [ ] T147 [GIT] Commit: add per-provider health checks
-- [ ] T148 [US4] Implement degraded/unhealthy status logic in crates/yappy-server/src/handlers/health.rs (use devs:rust-dev agent)
-- [ ] T149 [GIT] Commit: add health status logic
+- [x] T142 [US4] Implement GET /health endpoint in crates/yappy-server/src/handlers/health.rs (pre-existing in app.rs)
+- [x] T143 [GIT] Commit: add /health endpoint (pre-existing from earlier phases)
+- [x] T144 [US4] Implement uptime tracking in AppState in crates/yappy-server/src/state.rs (pre-existing from Phase 2)
+- [x] T145 [GIT] Commit: add uptime tracking (pre-existing from Phase 2)
+- [x] T146 [US4] Implement per-provider health_check() calls in health endpoint (pre-existing in app.rs health_handler)
+- [x] T147 [GIT] Commit: add per-provider health checks (pre-existing from earlier phases)
+- [x] T148 [US4] Implement degraded/unhealthy status logic (pre-existing in app.rs health_handler)
+- [x] T149 [GIT] Commit: add health status logic (pre-existing from earlier phases)
 
 ### Integration Test
-- [ ] T150 [US4] Create health check integration test in tests/integration/health_check.rs (use devs:rust-dev agent)
+- [x] T150 [US4] Create health check integration test in tests/integration/health_check.rs
 - [ ] T151 [GIT] Commit: add health check integration test
 
 ### Phase End

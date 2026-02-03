@@ -4,6 +4,7 @@
 //! Tests are organized into submodules by feature area.
 
 mod common;
+mod health_check;
 mod ws_basic;
 mod ws_providers;
 mod ws_voices;
