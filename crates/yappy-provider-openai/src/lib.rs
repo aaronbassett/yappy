@@ -1145,12 +1145,10 @@ mod tests {
         let result = provider.synthesize("Hello", &voice, format, cancel).await;
 
         // Should NOT be an InvalidVoice error
-        match result {
-            Err(ProviderError::InvalidVoice { .. }) => {
-                panic!("Empty voice should use default, not fail validation")
-            }
-            _ => {} // Any other error is fine (network error expected)
+        if let Err(ProviderError::InvalidVoice { .. }) = result {
+            panic!("Empty voice should use default, not fail validation");
         }
+        // Any other error is fine (network error expected)
     }
 
     #[tokio::test]
