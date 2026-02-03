@@ -692,7 +692,7 @@ mod tests {
         fn assert_no_false_break(text: &str, expected_sentence: &str) {
             let mut buffer = SentenceBuffer::default();
             // Add trailing whitespace and more text to confirm the sentence is complete
-            let full_text = format!("{} More text.", text);
+            let full_text = format!("{text} More text.");
             let sentences = buffer.push(&full_text);
 
             assert_eq!(
@@ -1141,8 +1141,7 @@ mod tests {
             assert_eq!(
                 sentences.len(),
                 3,
-                "Expected 3 sentences, got {:?}",
-                sentences
+                "Expected 3 sentences, got {sentences:?}"
             );
             assert_eq!(sentences[0].text, "A.");
             assert_eq!(sentences[1].text, "middle.");
