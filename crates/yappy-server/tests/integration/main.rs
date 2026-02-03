@@ -6,6 +6,7 @@
 mod common;
 mod health_check;
 mod ws_basic;
+mod ws_errors;
 mod ws_formats;
 mod ws_providers;
 mod ws_voices;

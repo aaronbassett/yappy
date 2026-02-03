@@ -43,6 +43,11 @@ pub enum MockSynthesisMode {
         /// Error message
         error: String,
     },
+    /// Return a rate limit error during synthesis
+    RateLimited {
+        /// Seconds until retry is allowed
+        retry_after_secs: u32,
+    },
 }
 
 impl Default for MockSynthesisMode {
@@ -267,6 +272,11 @@ impl TtsProvider for MockTtsProvider {
                 }));
 
                 Ok(Box::pin(stream::iter(items)))
+            }
+            MockSynthesisMode::RateLimited { retry_after_secs } => {
+                Err(ProviderError::RateLimited {
+                    retry_after_secs: *retry_after_secs,
+                })
             }
         }
     }
