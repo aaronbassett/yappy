@@ -142,12 +142,12 @@
 - [x] T068 [US1] Implement binary audio frame serialization (12-byte header + data) in crates/yappy-core/src/audio.rs (pre-existing, added tests)
 - [x] T069 [GIT] Commit: add binary audio frame serialization
 - [x] T070 [US1] Implement audio chunk streaming from provider to WebSocket in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T071 [GIT] Commit: add audio streaming
-- [ ] T072 [US1] Implement audio.done message with statistics in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T073 [GIT] Commit: add audio.done message
+- [x] T071 [GIT] Commit: add audio streaming
+- [x] T072 [US1] Implement audio.done message with statistics in crates/yappy-server/src/ws.rs (implemented as part of T070)
+- [x] T073 [GIT] Commit: add audio.done message (committed as part of T071)
 
 ### Kokoro Provider (Default)
-- [ ] T074 [US1] Implement Kokoro TtsProvider skeleton in crates/yappy-provider-kokoro/src/lib.rs (use devs:rust-dev agent)
+- [x] T074 [US1] Implement Kokoro TtsProvider skeleton in crates/yappy-provider-kokoro/src/lib.rs (use devs:rust-dev agent)
 - [ ] T075 [GIT] Commit: add Kokoro provider skeleton
 - [ ] T076 [US1] Implement ONNX model loading with hf-hub in crates/yappy-provider-kokoro/src/lib.rs (use devs:rust-dev agent)
 - [ ] T077 [GIT] Commit: add ONNX model loading

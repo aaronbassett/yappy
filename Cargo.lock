@@ -2643,6 +2643,7 @@ dependencies = [
  "hf-hub",
  "ort",
  "tokio",
+ "tokio-util",
  "tracing",
  "yappy-core",
 ]
