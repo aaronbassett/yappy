@@ -11,7 +11,15 @@ yappy-core = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
-# objc2-avf-audio = "0.3"  # Uncomment when implementing
+bytes = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true }
+
+# Objective-C runtime and Apple framework bindings
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSDictionary", "NSObject", "NSError"] }
+objc2-avf-audio = { version = "0.3", features = ["AVAudioBuffer", "AVSpeechSynthesis", "block2"] }
+block2 = "0.6"
 
 [lints]
 workspace = true

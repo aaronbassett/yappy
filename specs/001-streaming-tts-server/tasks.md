@@ -532,14 +532,14 @@
 ### OpenAI Provider
 - [x] T271 Implement OpenAI TtsProvider in crates/yappy-provider-openai/src/lib.rs (use devs:rust-dev agent)
   - **Depends on**: Phase 3 (US1) and Phase 4 (US2) complete - requires TtsProvider trait and ProviderRegistry
-- [ ] T272 [GIT] Commit: add OpenAI provider skeleton
-- [ ] T273 Implement reqwest streaming for OpenAI TTS API in crates/yappy-provider-openai/src/lib.rs (use devs:rust-dev agent)
-- [ ] T274 [GIT] Commit: add OpenAI streaming
-- [ ] T275 Implement rate limit handling with exponential backoff in crates/yappy-provider-openai/src/lib.rs (use devs:rust-dev agent)
-- [ ] T276 [GIT] Commit: add rate limit handling
+- [x] T272 [GIT] Commit: add OpenAI provider skeleton
+- [x] T273 Implement reqwest streaming for OpenAI TTS API in crates/yappy-provider-openai/src/lib.rs (implemented as part of T271)
+- [x] T274 [GIT] Commit: add OpenAI streaming (committed as part of T272)
+- [x] T275 Implement rate limit handling with exponential backoff in crates/yappy-provider-openai/src/lib.rs (implemented as part of T271)
+- [x] T276 [GIT] Commit: add rate limit handling (committed as part of T272)
 
 ### AVSpeech Provider (macOS only)
-- [ ] T277 Implement AVSpeech TtsProvider with objc2-avf-audio in crates/yappy-provider-avspeech/src/lib.rs (use devs:rust-dev agent)
+- [x] T277 Implement AVSpeech TtsProvider with objc2-avf-audio in crates/yappy-provider-avspeech/src/lib.rs (use devs:rust-dev agent)
   - **Depends on**: Phase 3 (US1) and Phase 4 (US2) complete - requires TtsProvider trait and ProviderRegistry
 - [ ] T278 [GIT] Commit: add AVSpeech provider skeleton
 - [ ] T279 Implement AVSpeechSynthesizerBufferCallback for streaming in crates/yappy-provider-avspeech/src/lib.rs (use devs:rust-dev agent)
