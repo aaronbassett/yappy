@@ -524,9 +524,9 @@
 **Independent Test**: Create session with each provider, verify synthesis works
 
 ### Phase Start
-- [ ] T267 [GIT] Verify working tree is clean before starting Phase 12
-- [ ] T268 [GIT] Pull and rebase on origin/main if needed
-- [ ] T269 Create specs/001-streaming-tts-server/retro/P12.md for this phase
+- [x] T267 [GIT] Verify working tree is clean before starting Phase 12
+- [x] T268 [GIT] Pull and rebase on origin/main if needed (already up to date)
+- [x] T269 Create specs/001-streaming-tts-server/retro/P12.md for this phase
 - [ ] T270 [GIT] Commit: initialize phase 12 retro
 
 ### OpenAI Provider
