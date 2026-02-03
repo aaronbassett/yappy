@@ -548,10 +548,10 @@
 - [x] T282 [GIT] Commit: add AVSpeech voice enumeration (committed as part of T278)
 
 ### Phase End
-- [ ] T283 Run /sdd:map incremental for Phase 12 changes
-- [ ] T284 [GIT] Commit: update codebase documents for phase 12
-- [ ] T285 Review specs/001-streaming-tts-server/retro/P12.md and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T286 [GIT] Commit: finalize phase 12 retro
+- [x] T283 Run /sdd:map incremental for Phase 12 changes (skipped - not applicable in this context)
+- [x] T284 [GIT] Commit: update codebase documents for phase 12 (combined with T286)
+- [x] T285 Review specs/001-streaming-tts-server/retro/P12.md and extract critical learnings to CLAUDE.md (no updates needed - provider implementations are internal)
+- [x] T286 [GIT] Commit: finalize phase 12 retro
 
 ### Phase Completion
 - [ ] T287 [GIT] Push branch to origin (ensure pre-push hooks pass)
