@@ -568,9 +568,9 @@
 **Purpose**: Improvements that affect multiple user stories
 
 ### Phase Start
-- [ ] T291 [GIT] Verify working tree is clean before starting Phase 13
-- [ ] T292 [GIT] Pull and rebase on origin/main if needed
-- [ ] T293 Create specs/001-streaming-tts-server/retro/P13.md for this phase
+- [x] T291 [GIT] Verify working tree is clean before starting Phase 13
+- [x] T292 [GIT] Pull and rebase on origin/main if needed (already up to date)
+- [x] T293 Create specs/001-streaming-tts-server/retro/P13.md for this phase
 - [ ] T294 [GIT] Commit: initialize phase 13 retro
 
 ### Timeouts
