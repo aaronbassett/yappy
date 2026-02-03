@@ -154,9 +154,8 @@ impl TtsProvider for AvSpeechProvider {
         // This is a stub implementation
         // Full implementation requires testing objc2-avf-audio APIs on macOS
         Err(ProviderError::NotConfigured {
-            reason:
-                "AVSpeech synthesis not yet implemented. This provider requires macOS testing."
-                    .to_string(),
+            reason: "AVSpeech synthesis not yet implemented. This provider requires macOS testing."
+                .to_string(),
         })
     }
 }
