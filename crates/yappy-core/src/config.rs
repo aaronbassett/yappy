@@ -494,11 +494,10 @@ mod tests {
             "error", "warn", "info", "debug", "trace", "ERROR", "WARN", "Info",
         ] {
             let mut config = valid_config();
-            config.server.log_level = level.to_string();
+            config.server.log_level = (*level).to_string();
             assert!(
                 config.validate().is_ok(),
-                "Log level '{}' should be valid",
-                level
+                "Log level '{level}' should be valid"
             );
         }
     }
@@ -547,11 +546,10 @@ mod tests {
             "kokoro", "openai", "avspeech", "KOKORO", "OpenAI", "AVSpeech",
         ] {
             let mut config = valid_config();
-            config.providers.default = provider.to_string();
+            config.providers.default = (*provider).to_string();
             assert!(
                 config.validate().is_ok(),
-                "Provider '{}' should be valid",
-                provider
+                "Provider '{provider}' should be valid"
             );
         }
     }
@@ -560,7 +558,7 @@ mod tests {
     fn test_openai_empty_api_key() {
         let mut config = valid_config();
         config.providers.openai = Some(OpenAiConfig {
-            api_key: "".to_string(),
+            api_key: String::new(),
             model: "tts-1".to_string(),
         });
 
