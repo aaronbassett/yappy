@@ -89,8 +89,8 @@
 
 ### Server Infrastructure (yappy-server)
 - [x] T038 Implement AppState with provider registry in crates/yappy-server/src/state.rs (use devs:rust-dev agent)
-- [ ] T039 [GIT] Commit: add AppState
-- [ ] T040 Implement Axum router setup in crates/yappy-server/src/app.rs (use devs:rust-dev agent)
+- [x] T039 [GIT] Commit: add AppState
+- [x] T040 Implement Axum router setup in crates/yappy-server/src/app.rs (use devs:rust-dev agent)
 - [ ] T041 [GIT] Commit: add Axum router
 - [ ] T042 Implement CLI argument parsing in crates/yappy-server/src/main.rs (use devs:rust-dev agent)
 - [ ] T043 [GIT] Commit: add CLI parsing
