@@ -273,9 +273,9 @@
 **Independent Test**: Call GET /health, verify response includes server status, uptime, and per-provider status
 
 ### Phase Start
-- [ ] T138 [GIT] Verify working tree is clean before starting Phase 6
-- [ ] T139 [GIT] Pull and rebase on origin/main if needed
-- [ ] T140 [US4] Create specs/001-streaming-tts-server/retro/P6.md for this phase
+- [x] T138 [GIT] Verify working tree is clean before starting Phase 6
+- [x] T139 [GIT] Pull and rebase on origin/main if needed (already up to date)
+- [x] T140 [US4] Create specs/001-streaming-tts-server/retro/P6.md for this phase
 - [ ] T141 [GIT] Commit: initialize phase 6 retro
 
 ### Health Endpoint
