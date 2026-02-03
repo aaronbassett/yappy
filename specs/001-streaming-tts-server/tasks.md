@@ -195,13 +195,13 @@
 - [x] T099 [GIT] Commit: add provider status tracking
 
 ### HTTP Endpoints
-- [ ] T100 [US2] Implement GET /providers endpoint in crates/yappy-server/src/handlers/providers.rs (use devs:rust-dev agent)
+- [x] T100 [US2] Implement GET /providers endpoint in crates/yappy-server/src/handlers/providers.rs (use devs:rust-dev agent)
   - **Note**: Blocks until T081 (Kokoro provider) complete - needs at least one provider registered
-- [ ] T101 [GIT] Commit: add /providers endpoint
-- [ ] T102 [US2] Implement provider selection in session.init handling in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T103 [GIT] Commit: add provider selection in session.init
-- [ ] T104 [US2] Implement session.error for unavailable provider with alternatives in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T105 [GIT] Commit: add session.error for unavailable provider
+- [x] T101 [GIT] Commit: add /providers endpoint
+- [x] T102 [US2] Implement provider selection in session.init handling in crates/yappy-server/src/ws.rs (use devs:rust-dev agent) (pre-existing from Phase 3)
+- [x] T103 [GIT] Commit: add provider selection in session.init (pre-existing from Phase 3)
+- [x] T104 [US2] Implement session.error for unavailable provider with alternatives in crates/yappy-server/src/ws.rs (use devs:rust-dev agent) (pre-existing from Phase 3)
+- [x] T105 [GIT] Commit: add session.error for unavailable provider (pre-existing from Phase 3)
 
 ### Integration Test
 - [ ] T106 [US2] Create provider selection integration test in tests/integration/ws_providers.rs (use devs:rust-dev agent)

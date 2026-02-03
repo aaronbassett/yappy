@@ -12,7 +12,7 @@ use tokio::time::timeout;
 
 use yappy_core::{
     config::{BufferConfigToml, Config, ProvidersConfig, ServerConfig},
-    provider::ProviderId,
+    provider::{ProviderId, ProviderStatus},
     TtsProvider,
 };
 use yappy_server::{create_router, AppState, ProviderRegistry};
@@ -83,7 +83,10 @@ impl TestServerBuilder {
     /// Add a mock provider with default configuration
     pub fn with_mock_provider(mut self, id: &str) -> Self {
         let provider = MockTtsProvider::new(id);
+        let provider_id = ProviderId::new(id);
         self.registry.register(provider);
+        self.registry
+            .record_status(provider_id, ProviderStatus::Available);
         if self.default_provider.is_none() {
             self.default_provider = Some(id.to_string());
         }
@@ -93,7 +96,10 @@ impl TestServerBuilder {
     /// Add a custom mock provider
     pub fn with_provider(mut self, provider: MockTtsProvider) -> Self {
         let id = provider.metadata().id.0;
+        let provider_id = ProviderId::new(&id);
         self.registry.register(provider);
+        self.registry
+            .record_status(provider_id, ProviderStatus::Available);
         if self.default_provider.is_none() {
             self.default_provider = Some(id);
         }
@@ -103,6 +109,33 @@ impl TestServerBuilder {
     /// Set the default provider
     pub fn with_default_provider(mut self, id: &str) -> Self {
         self.default_provider = Some(id.to_string());
+        self
+    }
+
+    /// Register an unavailable provider status (without actual provider implementation)
+    ///
+    /// This records a provider status for the `/providers` endpoint without registering
+    /// an actual provider implementation. Useful for testing error scenarios.
+    pub fn with_unavailable_provider(mut self, id: &str, reason: &str) -> Self {
+        self.registry.record_status(
+            ProviderId::new(id),
+            ProviderStatus::Unavailable {
+                reason: reason.to_string(),
+            },
+        );
+        self
+    }
+
+    /// Register a not-configured provider status
+    ///
+    /// This records a provider as not configured (e.g., missing API key).
+    pub fn with_not_configured_provider(mut self, id: &str, reason: &str) -> Self {
+        self.registry.record_status(
+            ProviderId::new(id),
+            ProviderStatus::NotConfigured {
+                reason: reason.to_string(),
+            },
+        );
         self
     }
 
