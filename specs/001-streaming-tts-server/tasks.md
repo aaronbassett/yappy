@@ -136,10 +136,10 @@
 - [x] T064 [US1] Implement text message handling with sentence buffer integration in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [x] T065 [GIT] Commit: add text message handling
 - [x] T066 [US1] Implement text.done handling and buffer flush in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
-- [ ] T067 [GIT] Commit: add text.done handling
+- [x] T067 [GIT] Commit: add text.done handling
 
 ### Audio Streaming
-- [ ] T068 [US1] Implement binary audio frame serialization (12-byte header + data) in crates/yappy-core/src/audio.rs (use devs:rust-dev agent)
+- [x] T068 [US1] Implement binary audio frame serialization (12-byte header + data) in crates/yappy-core/src/audio.rs (pre-existing, added tests)
 - [ ] T069 [GIT] Commit: add binary audio frame serialization
 - [ ] T070 [US1] Implement audio chunk streaming from provider to WebSocket in crates/yappy-server/src/ws.rs (use devs:rust-dev agent)
 - [ ] T071 [GIT] Commit: add audio streaming

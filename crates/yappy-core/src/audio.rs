@@ -118,3 +118,86 @@ impl AudioChunk {
 
 /// Stream of audio chunks from provider
 pub type AudioStream = Pin<Box<dyn Stream<Item = Result<AudioChunk, ProviderError>> + Send>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that `to_binary_frame()` produces correct 12-byte header + data
+    #[test]
+    fn test_audio_chunk_to_binary_frame() {
+        let audio_data = Bytes::from_static(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let chunk = AudioChunk::new(42, 7, audio_data.clone(), 100);
+
+        let frame = chunk.to_binary_frame();
+
+        // Total length should be 12-byte header + 4-byte data
+        assert_eq!(frame.len(), 16);
+
+        // Verify sequence (little-endian u32)
+        assert_eq!(&frame[0..4], &42u32.to_le_bytes());
+
+        // Verify sentence_index (little-endian u32)
+        assert_eq!(&frame[4..8], &7u32.to_le_bytes());
+
+        // Verify duration_ms (little-endian u32)
+        assert_eq!(&frame[8..12], &100u32.to_le_bytes());
+
+        // Verify audio data follows the header
+        assert_eq!(&frame[12..], &audio_data[..]);
+    }
+
+    /// Test that `from_binary_frame()` correctly parses and recovers original values
+    #[test]
+    fn test_audio_chunk_from_binary_frame() {
+        // Manually construct a binary frame
+        let mut frame_data = Vec::new();
+        frame_data.extend_from_slice(&123u32.to_le_bytes()); // sequence
+        frame_data.extend_from_slice(&5u32.to_le_bytes()); // sentence_index
+        frame_data.extend_from_slice(&250u32.to_le_bytes()); // duration_ms
+        frame_data.extend_from_slice(&[0x01, 0x02, 0x03]); // audio data
+
+        let frame = Bytes::from(frame_data);
+        let chunk = AudioChunk::from_binary_frame(&frame).expect("should parse valid frame");
+
+        assert_eq!(chunk.sequence, 123);
+        assert_eq!(chunk.sentence_index, 5);
+        assert_eq!(chunk.duration_ms, 250);
+        assert_eq!(&chunk.data[..], &[0x01, 0x02, 0x03]);
+    }
+
+    /// Test that serializing then parsing returns the same values
+    #[test]
+    fn test_audio_chunk_roundtrip() {
+        let original = AudioChunk::new(
+            999,
+            42,
+            Bytes::from_static(&[0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0xFF]),
+            5000,
+        );
+
+        let frame = original.to_binary_frame();
+        let parsed = AudioChunk::from_binary_frame(&frame).expect("roundtrip should succeed");
+
+        assert_eq!(parsed.sequence, original.sequence);
+        assert_eq!(parsed.sentence_index, original.sentence_index);
+        assert_eq!(parsed.duration_ms, original.duration_ms);
+        assert_eq!(parsed.data, original.data);
+    }
+
+    /// Test that `from_binary_frame()` returns None for data shorter than 12 bytes
+    #[test]
+    fn test_audio_chunk_from_binary_frame_too_short() {
+        // Empty data
+        let empty = Bytes::new();
+        assert!(AudioChunk::from_binary_frame(&empty).is_none());
+
+        // 11 bytes (one short of minimum header)
+        let too_short = Bytes::from_static(&[0; 11]);
+        assert!(AudioChunk::from_binary_frame(&too_short).is_none());
+
+        // Exactly 12 bytes (valid - header only, no audio data)
+        let just_header = Bytes::from_static(&[0; 12]);
+        assert!(AudioChunk::from_binary_frame(&just_header).is_some());
+    }
+}
