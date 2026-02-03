@@ -1,8 +1,8 @@
 //! Voice configuration integration tests for the Yappy TTS server
 //!
 //! These tests verify voice selection and configuration behavior:
-//! - Voice validation in session.init
-//! - invalid_voice error with alternatives
+//! - Voice validation in `session.init`
+//! - `invalid_voice` error with alternatives
 //! - Voice parameter validation (speed, pitch, volume)
 
 use yappy_core::{ClientMessage, ServerMessage, VoiceConfig};
@@ -95,7 +95,10 @@ async fn test_session_with_invalid_voice_returns_alternatives() {
             message,
             alternatives,
         } => {
-            assert_eq!(code, "invalid_voice", "Should have invalid_voice error code");
+            assert_eq!(
+                code, "invalid_voice",
+                "Should have invalid_voice error code"
+            );
             assert!(
                 message.contains("nonexistent_voice"),
                 "Message should reference the requested voice: {message}"
@@ -175,7 +178,7 @@ async fn test_voice_parameters_at_boundaries() {
             provider: None,
             voice: Some(VoiceConfig {
                 id: "test_voice_1".to_string(),
-                speed: 0.5, // Minimum valid speed
+                speed: 0.5,  // Minimum valid speed
                 pitch: -1.0, // Minimum valid pitch
                 volume: 0.0, // Minimum valid volume
             }),
@@ -206,8 +209,8 @@ async fn test_voice_parameters_at_boundaries() {
             provider: None,
             voice: Some(VoiceConfig {
                 id: "test_voice_1".to_string(),
-                speed: 2.0, // Maximum valid speed
-                pitch: 1.0, // Maximum valid pitch
+                speed: 2.0,  // Maximum valid speed
+                pitch: 1.0,  // Maximum valid pitch
                 volume: 1.0, // Maximum valid volume
             }),
             audio_format: None,
