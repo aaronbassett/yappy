@@ -104,11 +104,11 @@
 - [x] T048 Run /sdd:map incremental for Phase 2 changes (skipped - not applicable in this context)
 - [x] T049 [GIT] Commit: update codebase documents for phase 2 (combined with T051)
 - [x] T050 Review specs/001-streaming-tts-server/retro/P2.md and extract critical learnings to CLAUDE.md (no critical learnings to add)
-- [ ] T051 [GIT] Commit: finalize phase 2 retro
+- [x] T051 [GIT] Commit: finalize phase 2 retro
 
 ### Phase Completion
-- [ ] T052 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T053 [GIT] Create/update PR to main with phase summary
+- [x] T052 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [x] T053 [GIT] Create/update PR to main with phase summary (added comment to PR #1)
 - [ ] T054 [GIT] Verify all CI checks pass
 - [ ] T055 [GIT] Report PR ready status
 
