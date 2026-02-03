@@ -3064,7 +3064,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "yappy-core",
+ "yappy-provider-avspeech",
  "yappy-provider-kokoro",
+ "yappy-provider-openai",
 ]
 
 [[package]]

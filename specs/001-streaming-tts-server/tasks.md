@@ -541,11 +541,11 @@
 ### AVSpeech Provider (macOS only)
 - [x] T277 Implement AVSpeech TtsProvider with objc2-avf-audio in crates/yappy-provider-avspeech/src/lib.rs (use devs:rust-dev agent)
   - **Depends on**: Phase 3 (US1) and Phase 4 (US2) complete - requires TtsProvider trait and ProviderRegistry
-- [ ] T278 [GIT] Commit: add AVSpeech provider skeleton
-- [ ] T279 Implement AVSpeechSynthesizerBufferCallback for streaming in crates/yappy-provider-avspeech/src/lib.rs (use devs:rust-dev agent)
-- [ ] T280 [GIT] Commit: add AVSpeech streaming
-- [ ] T281 Implement system voice enumeration in crates/yappy-provider-avspeech/src/lib.rs (use devs:rust-dev agent)
-- [ ] T282 [GIT] Commit: add AVSpeech voice enumeration
+- [x] T278 [GIT] Commit: add AVSpeech provider skeleton
+- [x] T279 Implement AVSpeechSynthesizerBufferCallback for streaming in crates/yappy-provider-avspeech/src/lib.rs (implemented as part of T277)
+- [x] T280 [GIT] Commit: add AVSpeech streaming (committed as part of T278)
+- [x] T281 Implement system voice enumeration in crates/yappy-provider-avspeech/src/lib.rs (implemented as part of T277)
+- [x] T282 [GIT] Commit: add AVSpeech voice enumeration (committed as part of T278)
 
 ### Phase End
 - [ ] T283 Run /sdd:map incremental for Phase 12 changes

@@ -441,7 +441,7 @@ impl std::fmt::Debug for ProviderRegistry {
 /// ```
 // Allow unused_async when no provider features are enabled, as the function
 // becomes non-async in that case but we want a consistent API.
-#[allow(clippy::unused_async)]
+#[allow(clippy::unused_async, clippy::too_many_lines)]
 pub async fn register_providers(config: &yappy_core::Config) -> ProviderRegistry {
     use tracing::{debug, info, warn};
 
@@ -482,54 +482,58 @@ pub async fn register_providers(config: &yappy_core::Config) -> ProviderRegistry
     }
 
     // Register OpenAI provider if feature is enabled
-    // TODO: Implement when yappy-provider-openai crate exists
     #[cfg(feature = "openai-tts")]
     {
         let openai_id = ProviderId::new("openai");
-        debug!("OpenAI TTS feature enabled, but provider not yet implemented");
-        registry.record_status(
-            openai_id,
-            ProviderStatus::NotConfigured {
-                reason: "Provider not yet implemented".to_string(),
-            },
-        );
-        // When implemented:
-        // match register_openai_provider(config).await {
-        //     Ok(provider) => {
-        //         info!("OpenAI provider registered successfully");
-        //         registry.register(provider);
-        //         registry.record_status(openai_id, ProviderStatus::Available);
-        //     }
-        //     Err(e) => {
-        //         warn!(error = %e, "Failed to initialize OpenAI provider, skipping");
-        //         registry.record_status(
-        //             openai_id,
-        //             ProviderStatus::NotConfigured { reason: e.to_string() },
-        //         );
-        //     }
-        // }
+        debug!("OpenAI TTS feature enabled, attempting to register provider");
+        match register_openai_provider(config).await {
+            Ok(provider) => {
+                info!("OpenAI provider registered successfully");
+                registry.register(provider);
+                registry.record_status(openai_id, ProviderStatus::Available);
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to initialize OpenAI provider, skipping");
+                registry.record_status(
+                    openai_id,
+                    ProviderStatus::NotConfigured {
+                        reason: e.to_string(),
+                    },
+                );
+            }
+        }
     }
 
     // Register AVSpeech provider if feature is enabled (macOS only)
-    // TODO: Implement when yappy-provider-avspeech crate exists
     #[cfg(feature = "avspeech")]
     {
         let avspeech_id = ProviderId::new("avspeech");
-        debug!("AVSpeech feature enabled, but provider not yet implemented");
 
         // AVSpeech is macOS only - check platform
         #[cfg(target_os = "macos")]
         {
-            registry.record_status(
-                avspeech_id,
-                ProviderStatus::NotConfigured {
-                    reason: "Provider not yet implemented".to_string(),
-                },
-            );
+            debug!("AVSpeech feature enabled on macOS, attempting to register provider");
+            match register_avspeech_provider(config).await {
+                Ok(provider) => {
+                    info!("AVSpeech provider registered successfully");
+                    registry.register(provider);
+                    registry.record_status(avspeech_id, ProviderStatus::Available);
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to initialize AVSpeech provider, skipping");
+                    registry.record_status(
+                        avspeech_id,
+                        ProviderStatus::Unavailable {
+                            reason: e.to_string(),
+                        },
+                    );
+                }
+            }
         }
 
         #[cfg(not(target_os = "macos"))]
         {
+            debug!("AVSpeech feature enabled but not on macOS, marking unavailable");
             registry.record_status(
                 avspeech_id,
                 ProviderStatus::Unavailable {
@@ -537,22 +541,6 @@ pub async fn register_providers(config: &yappy_core::Config) -> ProviderRegistry
                 },
             );
         }
-
-        // When implemented:
-        // match register_avspeech_provider(config).await {
-        //     Ok(provider) => {
-        //         info!("AVSpeech provider registered successfully");
-        //         registry.register(provider);
-        //         registry.record_status(avspeech_id, ProviderStatus::Available);
-        //     }
-        //     Err(e) => {
-        //         warn!(error = %e, "Failed to initialize AVSpeech provider, skipping");
-        //         registry.record_status(
-        //             avspeech_id,
-        //             ProviderStatus::Unavailable { reason: e.to_string() },
-        //         );
-        //     }
-        // }
     }
 
     // Set default provider from config
@@ -636,6 +624,101 @@ async fn register_kokoro_provider(
     // Load the model (this may download from HuggingFace)
     debug!("Loading Kokoro model (this may download on first run)");
     provider.load_model().await?;
+
+    Ok(provider)
+}
+
+/// Register the `OpenAI` TTS provider.
+///
+/// Creates an `OpenAI` provider based on the configuration.
+/// Requires an API key to be configured (via config or `OPENAI_API_KEY` env var).
+#[cfg(feature = "openai-tts")]
+async fn register_openai_provider(
+    config: &yappy_core::Config,
+) -> Result<yappy_provider_openai::OpenAiProvider, yappy_core::error::ProviderError> {
+    use tracing::debug;
+    use yappy_provider_openai::{OpenAiConfig, OpenAiProvider};
+
+    // Get OpenAI configuration
+    let openai_config = config.providers.openai.as_ref().map_or_else(
+        || {
+            // Check for API key in environment variable
+            std::env::var("OPENAI_API_KEY").map_or_else(
+                |_| {
+                    debug!("No OpenAI configuration found");
+                    OpenAiConfig::default()
+                },
+                |api_key| {
+                    debug!("Using OpenAI API key from environment variable");
+                    OpenAiConfig::new(api_key)
+                },
+            )
+        },
+        |cfg| {
+            // Expand environment variable references in API key (e.g., "$OPENAI_API_KEY")
+            let api_key = if cfg.api_key.starts_with('$') {
+                let var_name = &cfg.api_key[1..];
+                std::env::var(var_name).unwrap_or_default()
+            } else {
+                cfg.api_key.clone()
+            };
+
+            debug!(
+                model = %cfg.model,
+                "Using custom OpenAI configuration"
+            );
+
+            OpenAiConfig::with_model(api_key, cfg.model.clone())
+        },
+    );
+
+    // Validate that API key is configured
+    if !openai_config.is_api_key_configured() {
+        return Err(yappy_core::error::ProviderError::NotConfigured {
+            reason: "OpenAI API key not configured. Set OPENAI_API_KEY environment variable or configure in yappy.toml".to_string(),
+        });
+    }
+
+    let provider = OpenAiProvider::new(openai_config);
+
+    // Health check to validate configuration
+    let status = provider.health_check().await;
+    if !status.is_available() {
+        return Err(yappy_core::error::ProviderError::NotConfigured {
+            reason: format!("OpenAI provider health check failed: {status:?}"),
+        });
+    }
+
+    Ok(provider)
+}
+
+/// Register the AVSpeech provider (macOS only).
+///
+/// Creates an AVSpeech provider using the system's AVSpeechSynthesizer.
+/// Only available on macOS targets.
+#[cfg(all(feature = "avspeech", target_os = "macos"))]
+async fn register_avspeech_provider(
+    config: &yappy_core::Config,
+) -> Result<yappy_provider_avspeech::AvSpeechProvider, yappy_core::error::ProviderError> {
+    use tracing::debug;
+    use yappy_provider_avspeech::{AvSpeechConfig, AvSpeechProvider};
+
+    // Check if AVSpeech is enabled in config
+    let enabled = config
+        .providers
+        .avspeech
+        .as_ref()
+        .map_or(true, |cfg| cfg.enabled);
+
+    if !enabled {
+        return Err(yappy_core::error::ProviderError::NotConfigured {
+            reason: "AVSpeech is disabled in configuration".to_string(),
+        });
+    }
+
+    debug!("Using default AVSpeech configuration");
+    let avspeech_config = AvSpeechConfig::default();
+    let provider = AvSpeechProvider::new(avspeech_config);
 
     Ok(provider)
 }

@@ -16,6 +16,8 @@ path = "src/main.rs"
 [dependencies]
 yappy-core = { workspace = true }
 yappy-provider-kokoro = { workspace = true, optional = true }
+yappy-provider-openai = { workspace = true, optional = true }
+yappy-provider-avspeech = { workspace = true, optional = true }
 
 # Web framework
 axum = { workspace = true }
@@ -50,8 +52,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 [features]
 default = ["kokoro"]
 kokoro = ["dep:yappy-provider-kokoro"]
-openai-tts = []
-avspeech = []
+openai-tts = ["dep:yappy-provider-openai"]
+avspeech = ["dep:yappy-provider-avspeech"]
 all-providers = ["kokoro", "openai-tts", "avspeech"]
 
 [lints]

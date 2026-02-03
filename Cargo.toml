@@ -68,6 +68,8 @@ hf-hub = { version = "0.4", features = ["tokio"] }
 # Internal crates
 yappy-core = { path = "crates/yappy-core" }
 yappy-provider-kokoro = { path = "crates/yappy-provider-kokoro" }
+yappy-provider-openai = { path = "crates/yappy-provider-openai" }
+yappy-provider-avspeech = { path = "crates/yappy-provider-avspeech" }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
