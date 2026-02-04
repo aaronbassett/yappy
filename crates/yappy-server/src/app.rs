@@ -100,6 +100,12 @@ pub struct ProviderStatusResponse {
 /// Health check handler
 ///
 /// Returns the server health status including uptime and provider availability.
+/// Reports on ALL compiled-in providers, including those that failed to initialize
+/// (`NotConfigured` or `Unavailable`), to give operators complete visibility.
+///
+/// For providers marked as `Available` in the initialization status, this handler
+/// performs a dynamic health check to verify current availability. Providers that
+/// were `NotConfigured` or `Unavailable` at startup retain their initialization status.
 ///
 /// # Response
 ///
@@ -110,10 +116,12 @@ pub struct ProviderStatusResponse {
 ///
 /// ```json
 /// {
-///   "status": "ok",
+///   "status": "degraded",
 ///   "uptime_secs": 3600,
 ///   "providers": {
-///     "kokoro": {"status": "available"}
+///     "kokoro": {"status": "available"},
+///     "openai": {"status": "not_configured", "reason": "API key not set"},
+///     "avspeech": {"status": "unavailable", "reason": "macOS only"}
 ///   }
 /// }
 /// ```
@@ -121,23 +129,37 @@ pub async fn health_handler(State(state): State<AppState>) -> Response {
     let uptime_secs = state.uptime().as_secs();
     let registry = state.providers();
 
-    // Build provider status map
+    // Build provider status map from all known providers (not just registered ones)
+    // This ensures NotConfigured and Unavailable providers are included (fixes #18)
     let mut providers = HashMap::new();
     let mut available_count = 0;
     let mut total_count = 0;
 
-    for metadata in registry.list() {
+    for (provider_id, init_status) in registry.all_statuses() {
         total_count += 1;
-        let provider_id = metadata.id.0.clone();
+        let id_string = provider_id.0.clone();
 
-        // Get the actual provider to check its health
-        if let Some(provider) = registry.get(&metadata.id) {
-            let status = provider.health_check().await;
-            if status.is_available() {
-                available_count += 1;
+        // For providers that initialized successfully, perform a dynamic health check
+        // For NotConfigured/Unavailable providers, use the recorded initialization status
+        let status = if init_status.is_available() {
+            // Provider was available at startup - check current health
+            if let Some(provider) = registry.get(provider_id) {
+                provider.health_check().await
+            } else {
+                // Status says available but provider not in registry - unexpected state
+                ProviderStatus::Unavailable {
+                    reason: "Provider registered but not found".to_string(),
+                }
             }
-            providers.insert(provider_id, ProviderStatusResponse { status });
+        } else {
+            // Provider was NotConfigured or Unavailable at startup - use that status
+            init_status.clone()
+        };
+
+        if status.is_available() {
+            available_count += 1;
         }
+        providers.insert(id_string, ProviderStatusResponse { status });
     }
 
     // Determine overall health status
@@ -358,6 +380,125 @@ mod tests {
         let health: HealthResponse = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(health.status, HealthStatus::Degraded);
+    }
+
+    /// Test that /health includes NotConfigured providers that weren't registered
+    /// (fixes #18: /health endpoint omits NotConfigured/Unavailable providers)
+    #[tokio::test]
+    async fn test_health_includes_not_configured_providers() {
+        let config = create_test_config();
+        let mut registry = ProviderRegistry::new();
+
+        // Register one available provider
+        registry.register(MockProvider::new("kokoro", "Kokoro"));
+        registry.record_status(ProviderId::new("kokoro"), ProviderStatus::Available);
+        registry.set_default(ProviderId::new("kokoro"));
+
+        // Record NotConfigured status for a provider that's NOT registered
+        // (simulates provider that failed config validation at startup)
+        registry.record_status(
+            ProviderId::new("openai"),
+            ProviderStatus::NotConfigured {
+                reason: "API key not set".to_string(),
+            },
+        );
+
+        // Record Unavailable status for another provider that's NOT registered
+        // (simulates provider that's not available on this platform)
+        registry.record_status(
+            ProviderId::new("avspeech"),
+            ProviderStatus::Unavailable {
+                reason: "macOS only".to_string(),
+            },
+        );
+
+        let state = AppState::new(config, registry);
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let health: HealthResponse = serde_json::from_slice(&body).unwrap();
+
+        // Should be degraded (1 available, 2 not available)
+        assert_eq!(health.status, HealthStatus::Degraded);
+
+        // All 3 providers should be in the response
+        assert_eq!(health.providers.len(), 3);
+        assert!(health.providers.contains_key("kokoro"));
+        assert!(health.providers.contains_key("openai"));
+        assert!(health.providers.contains_key("avspeech"));
+
+        // Verify status values
+        assert!(health.providers["kokoro"].status.is_available());
+
+        match &health.providers["openai"].status {
+            ProviderStatus::NotConfigured { reason } => {
+                assert_eq!(reason, "API key not set");
+            }
+            other => panic!("Expected NotConfigured, got {:?}", other),
+        }
+
+        match &health.providers["avspeech"].status {
+            ProviderStatus::Unavailable { reason } => {
+                assert_eq!(reason, "macOS only");
+            }
+            other => panic!("Expected Unavailable, got {:?}", other),
+        }
+    }
+
+    /// Test that /health returns unhealthy when only NotConfigured providers exist
+    #[tokio::test]
+    async fn test_health_unhealthy_with_only_not_configured_providers() {
+        let config = create_test_config();
+        let mut registry = ProviderRegistry::new();
+
+        // Only record NotConfigured status - no actual providers registered
+        registry.record_status(
+            ProviderId::new("openai"),
+            ProviderStatus::NotConfigured {
+                reason: "API key not set".to_string(),
+            },
+        );
+
+        let state = AppState::new(config, registry);
+        let app = create_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should return 503 since no providers are available
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let health: HealthResponse = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(health.status, HealthStatus::Unhealthy);
+
+        // The NotConfigured provider should still be in the response
+        assert_eq!(health.providers.len(), 1);
+        assert!(health.providers.contains_key("openai"));
     }
 
     #[tokio::test]
