@@ -715,3 +715,112 @@ async fn test_multiple_sentences_with_errors_report_correct_indices() {
 
     server.shutdown();
 }
+
+// ============================================================================
+// Stalled Provider Timeout Tests
+// ============================================================================
+
+/// Test: Provider stalls mid-stream, per-chunk idle timeout triggers error
+///
+/// Verifies the per-chunk idle timeout correctly detects stalled providers.
+#[tokio::test]
+async fn test_stalled_provider_triggers_chunk_timeout() {
+    let stalled_provider =
+        MockTtsProvider::new("stalled").with_synthesis_mode(MockSynthesisMode::Stalled {
+            chunks_before_stall: 2,
+            chunk_duration_ms: 100,
+            chunk_bytes: 256,
+        });
+
+    let server = TestServerBuilder::new()
+        .with_provider(stalled_provider)
+        .with_default_provider("stalled")
+        .with_synthesis_timeout_secs(1)
+        .spawn()
+        .await;
+
+    let mut ws = connect_ws(&server)
+        .await
+        .expect("Should connect to WebSocket");
+
+    init_session(&mut ws, Some("stalled"))
+        .await
+        .expect("Should initialize session");
+
+    let text_msg = ClientMessage::Text {
+        content: "First sentence. More text".to_string(),
+    };
+    send_message(&mut ws, &text_msg)
+        .await
+        .expect("Should send text");
+
+    let (audio_chunks_received, error_sentence_index, error_message) =
+        collect_chunks_until_timeout_error(&mut ws).await;
+
+    assert_eq!(
+        audio_chunks_received, 2,
+        "Should receive 2 chunks before stall"
+    );
+    assert_eq!(
+        error_sentence_index,
+        Some(0),
+        "Error should include sentence_index 0"
+    );
+    assert!(
+        error_message.contains("Audio chunk timed out"),
+        "Error message should indicate chunk timeout: {error_message}"
+    );
+
+    let (total_sentences, _, _) = finish_session(&mut ws)
+        .await
+        .expect("Should finish session");
+    assert_eq!(
+        total_sentences, 2,
+        "Total sentences should be 2 (1 timed out + 1 flushed)"
+    );
+
+    server.shutdown();
+}
+
+/// Helper to collect audio chunks until a timeout error is received
+async fn collect_chunks_until_timeout_error<S>(ws: &mut S) -> (usize, Option<u32>, String)
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let mut audio_chunks_received = 0;
+    let mut error_sentence_index = None;
+    let mut error_message = String::new();
+
+    for _ in 0..20 {
+        match timeout(Duration::from_secs(3), ws.next()).await {
+            Ok(Some(Ok(Message::Binary(data)))) => {
+                if AudioChunk::from_binary_frame(&Bytes::from(data.to_vec())).is_some() {
+                    audio_chunks_received += 1;
+                }
+            }
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let msg: ServerMessage = serde_json::from_str(&text).expect("Should parse message");
+                if let ServerMessage::Error {
+                    code,
+                    message,
+                    fatal,
+                    sentence_index,
+                } = msg
+                {
+                    assert_eq!(
+                        code, "synthesis_failed",
+                        "Error code should be synthesis_failed"
+                    );
+                    assert!(!fatal, "Error should be non-fatal");
+                    error_sentence_index = sentence_index;
+                    error_message = message;
+                    break;
+                }
+            }
+            Ok(Some(Ok(Message::Close(_))) | None) | Err(_) => break,
+            _ => {}
+        }
+    }
+
+    (audio_chunks_received, error_sentence_index, error_message)
+}

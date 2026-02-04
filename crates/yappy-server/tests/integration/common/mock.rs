@@ -59,6 +59,18 @@ pub enum MockSynthesisMode {
         /// Seconds until retry is allowed
         retry_after_secs: u32,
     },
+    /// Return some chunks then stall indefinitely (for timeout testing)
+    ///
+    /// This simulates a provider that becomes unresponsive mid-stream,
+    /// useful for testing per-chunk idle timeout behavior.
+    Stalled {
+        /// Number of chunks to emit before stalling
+        chunks_before_stall: usize,
+        /// Duration in ms for each chunk
+        chunk_duration_ms: u32,
+        /// Bytes of audio data per chunk
+        chunk_bytes: usize,
+    },
 }
 
 impl Default for MockSynthesisMode {
@@ -199,7 +211,7 @@ impl MockTtsProvider {
 }
 
 #[async_trait]
-#[allow(clippy::cast_possible_truncation)]
+#[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
 impl TtsProvider for MockTtsProvider {
     fn metadata(&self) -> ProviderMetadata {
         ProviderMetadata {
@@ -326,6 +338,42 @@ impl TtsProvider for MockTtsProvider {
                 Err(ProviderError::RateLimited {
                     retry_after_secs: *retry_after_secs,
                 })
+            }
+            MockSynthesisMode::Stalled {
+                chunks_before_stall,
+                chunk_duration_ms,
+                chunk_bytes,
+            } => {
+                // Create a stream that emits some chunks then blocks forever
+                let chunks_before_stall = *chunks_before_stall;
+                let chunk_duration_ms = *chunk_duration_ms;
+                let chunk_bytes = *chunk_bytes;
+
+                let stream = async_stream::stream! {
+                    // Emit the initial chunks
+                    for i in 0..chunks_before_stall {
+                        let mut data = vec![0xCC; chunk_bytes];
+                        if chunk_bytes > 0 {
+                            data[0] = 0xCC; // Marker for stalled provider chunks
+                        }
+                        if chunk_bytes > 1 {
+                            data[1] = i as u8;
+                        }
+
+                        yield Ok(AudioChunk::new(
+                            i as u32,
+                            0,
+                            Bytes::from(data),
+                            chunk_duration_ms,
+                        ));
+                    }
+
+                    // Now stall indefinitely - this simulates a provider that stops
+                    // producing chunks. The per-chunk idle timeout should fire.
+                    std::future::pending::<()>().await;
+                };
+
+                Ok(Box::pin(stream))
             }
         }
     }

@@ -75,6 +75,8 @@ pub struct TestServerBuilder {
     default_provider: Option<String>,
     /// Audio channel capacity for backpressure (None = use default)
     audio_channel_capacity: Option<usize>,
+    /// Synthesis timeout in seconds (None = use default 30s)
+    synthesis_timeout_secs: Option<u64>,
 }
 
 impl Default for TestServerBuilder {
@@ -90,6 +92,7 @@ impl TestServerBuilder {
             registry: ProviderRegistry::new(),
             default_provider: None,
             audio_channel_capacity: None,
+            synthesis_timeout_secs: None,
         }
     }
 
@@ -99,6 +102,15 @@ impl TestServerBuilder {
     /// in integration tests without generating large amounts of data.
     pub const fn with_audio_channel_capacity(mut self, capacity: usize) -> Self {
         self.audio_channel_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the synthesis timeout for timeout testing
+    ///
+    /// A shorter timeout (e.g., 1-2 seconds) makes it practical to test
+    /// timeout behavior without long test execution times.
+    pub const fn with_synthesis_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.synthesis_timeout_secs = Some(timeout_secs);
         self
     }
 
@@ -190,6 +202,9 @@ impl TestServerBuilder {
         let mut server_config = ServerConfig::default();
         if let Some(capacity) = self.audio_channel_capacity {
             server_config.audio_channel_capacity = capacity;
+        }
+        if let Some(timeout_secs) = self.synthesis_timeout_secs {
+            server_config.synthesis_timeout_secs = timeout_secs;
         }
 
         let config = Config {
