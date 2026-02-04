@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, Utf8Bytes, WebSocket, WebSocketUpgrade},
         State,
     },
     response::Response,
@@ -73,6 +73,14 @@ use crate::state::{AppState, ProviderRegistry};
 /// Default flush timeout when no session is active yet.
 /// This is only used before session.init is received.
 const DEFAULT_FLUSH_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// WebSocket close code for "Going Away" (RFC 6455).
+/// Used when the server is closing the connection due to timeout.
+const CLOSE_CODE_GOING_AWAY: u16 = 1001;
+
+/// WebSocket close code for "Policy Violation" (RFC 6455).
+/// Used when the client violates protocol requirements (e.g., no session.init).
+const CLOSE_CODE_POLICY_VIOLATION: u16 = 1008;
 
 /// Metrics for tracking backpressure events during a session.
 #[derive(Debug, Default)]
@@ -102,6 +110,32 @@ impl BackpressureMetrics {
     fn total_time_ms(&self) -> u64 {
         self.total_backpressure_ms.load(Ordering::Relaxed)
     }
+}
+
+/// Send a WebSocket close frame with a code and reason.
+///
+/// This function sends an explicit close frame to the client before closing
+/// the connection. Per RFC 6455, this allows the client to understand why
+/// the connection was closed.
+///
+/// # Arguments
+///
+/// * `sender` - The WebSocket sender to send the close frame through
+/// * `code` - The close code (e.g., 1001 for Going Away, 1008 for Policy Violation)
+/// * `reason` - A human-readable reason for the closure
+///
+/// # Returns
+///
+/// Returns `Ok(())` if the close frame was sent successfully, or an error on failure.
+async fn send_close_frame<S>(sender: &mut S, code: u16, reason: &str) -> Result<(), S::Error>
+where
+    S: SinkExt<Message> + Unpin,
+{
+    let close_frame = CloseFrame {
+        code,
+        reason: Utf8Bytes::from(reason.to_string()),
+    };
+    sender.send(Message::Close(Some(close_frame))).await
 }
 
 /// WebSocket upgrade handler for the `/ws` endpoint.
@@ -264,6 +298,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             if let Err(err) = send_server_message(bp_sender.inner_mut(), &response).await {
                 warn!("Failed to send session init timeout error: {}", err);
             }
+            // Send explicit close frame before breaking (fixes #7)
+            let reason = format!(
+                "Session init timeout: no session.init received within {} seconds",
+                session_init_timeout.as_secs()
+            );
+            if let Err(err) =
+                send_close_frame(bp_sender.inner_mut(), CLOSE_CODE_POLICY_VIOLATION, &reason).await
+            {
+                warn!(
+                    "Failed to send close frame for session init timeout: {}",
+                    err
+                );
+            }
             break;
         }
 
@@ -275,11 +322,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 timeout_secs = idle_timeout.as_secs(),
                 "Idle connection timeout"
             );
-            // Send close frame with reason - the connection will be closed after this
-            // Note: We don't send a JSON error here because the WebSocket close frame
-            // carries the reason. The client should handle the close frame appropriately.
             if let Some(ref s) = session {
                 info!(session_id = %s.id, "Closing connection due to idle timeout");
+            }
+            // Send explicit close frame with reason (fixes #7)
+            let reason = format!(
+                "Idle timeout: no activity for {} seconds",
+                idle_timeout.as_secs()
+            );
+            if let Err(err) =
+                send_close_frame(bp_sender.inner_mut(), CLOSE_CODE_GOING_AWAY, &reason).await
+            {
+                warn!("Failed to send close frame for idle timeout: {}", err);
             }
             break;
         }
