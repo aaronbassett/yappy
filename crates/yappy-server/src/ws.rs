@@ -2464,25 +2464,67 @@ fn negotiate_audio_format(
     supported_formats: &[AudioFormat],
     requested: &AudioFormat,
 ) -> Option<AudioFormat> {
-    // Check if the exact codec is natively supported
-    let native_support = supported_formats.iter().any(|f| f.codec == requested.codec);
+    // Check if there's a native format that matches the requested format
+    // (codec, sample_rate, channels, and bits_per_sample must all be compatible)
+    let native_match = supported_formats.iter().find(|f| {
+        f.codec == requested.codec
+            && f.sample_rate == requested.sample_rate
+            && f.channels == requested.channels
+            && (f.bits_per_sample == requested.bits_per_sample
+                || f.bits_per_sample.is_none()
+                || requested.bits_per_sample.is_none())
+    });
 
-    if native_support {
-        // Provider natively supports this codec - use the requested format
+    if native_match.is_some() {
+        // Provider natively supports this exact format
         return Some(requested.clone());
     }
 
     // Check if we can transcode from PCM to the requested format
-    let provider_supports_pcm = supported_formats.iter().any(|f| f.codec == AudioCodec::Pcm);
+    // Find a PCM format from the provider that matches sample rate and channels
+    let compatible_pcm = supported_formats.iter().find(|f| {
+        f.codec == AudioCodec::Pcm
+            && f.sample_rate == requested.sample_rate
+            && f.channels == requested.channels
+    });
 
-    if provider_supports_pcm && Transcoder::can_transcode(AudioCodec::Pcm, requested.codec) {
-        // We can transcode from PCM to the requested format
-        // Return the requested format (transcoding will happen at stream time)
-        return Some(requested.clone());
+    if compatible_pcm.is_some() && Transcoder::can_transcode(AudioCodec::Pcm, requested.codec) {
+        // Validate that the requested format parameters are supported by the target encoder
+        if is_format_supported_by_encoder(requested) {
+            // We can transcode from PCM to the requested format
+            return Some(requested.clone());
+        }
     }
 
     // Format cannot be provided
     None
+}
+
+/// Check if the requested audio format parameters are supported by the encoder.
+///
+/// This validates that `sample_rate` and `channels` are within the encoder's capabilities.
+fn is_format_supported_by_encoder(format: &AudioFormat) -> bool {
+    match format.codec {
+        AudioCodec::Opus => {
+            // Opus supports specific sample rates: 8000, 12000, 16000, 24000, 48000
+            let valid_sample_rate =
+                matches!(format.sample_rate, 8000 | 12000 | 16000 | 24000 | 48000);
+            // Opus supports 1 (mono) or 2 (stereo) channels
+            let valid_channels = format.channels == 1 || format.channels == 2;
+            valid_sample_rate && valid_channels
+        }
+        AudioCodec::Mp3 => {
+            // MP3 supports sample rates from 8000 to 48000
+            let valid_sample_rate = (8000..=48000).contains(&format.sample_rate);
+            // MP3 supports 1 (mono) or 2 (stereo) channels
+            let valid_channels = format.channels == 1 || format.channels == 2;
+            valid_sample_rate && valid_channels
+        }
+        AudioCodec::Pcm => {
+            // PCM is pass-through, always valid
+            true
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3493,6 +3535,207 @@ mod tests {
 
         let result = negotiate_audio_format(&formats, &requested);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_negotiate_audio_format_sample_rate_mismatch() {
+        // Provider supports Opus at 48000Hz, client requests 24000Hz
+        let formats = vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: None,
+        }];
+
+        let requested = AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: None,
+        };
+
+        let result = negotiate_audio_format(&formats, &requested);
+        // Should fail - sample rate doesn't match
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_negotiate_audio_format_channels_mismatch() {
+        // Provider supports Opus mono, client requests stereo
+        let formats = vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: None,
+        }];
+
+        let requested = AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 48000,
+            channels: 2,
+            bits_per_sample: None,
+        };
+
+        let result = negotiate_audio_format(&formats, &requested);
+        // Should fail - channels don't match
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_negotiate_audio_format_transcode_sample_rate_mismatch() {
+        // Provider supports PCM at 24000Hz, client requests Opus at 48000Hz
+        let formats = vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Pcm,
+            sample_rate: 24000,
+            channels: 1,
+            bits_per_sample: Some(16),
+        }];
+
+        let requested = AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: None,
+        };
+
+        let result = negotiate_audio_format(&formats, &requested);
+        // Should fail - PCM sample rate doesn't match requested
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_negotiate_audio_format_transcode_invalid_opus_sample_rate() {
+        // Provider supports PCM at 22050Hz, client requests Opus at 22050Hz
+        // But 22050Hz is not a valid Opus sample rate
+        let formats = vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Pcm,
+            sample_rate: 22050,
+            channels: 1,
+            bits_per_sample: Some(16),
+        }];
+
+        let requested = AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 22050,
+            channels: 1,
+            bits_per_sample: None,
+        };
+
+        let result = negotiate_audio_format(&formats, &requested);
+        // Should fail - 22050Hz is not valid for Opus encoding
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_negotiate_audio_format_transcode_invalid_channels() {
+        // Provider supports PCM with 3 channels, but encoders only support 1 or 2
+        let formats = vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Pcm,
+            sample_rate: 24000,
+            channels: 3,
+            bits_per_sample: Some(16),
+        }];
+
+        let requested = AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 24000,
+            channels: 3,
+            bits_per_sample: None,
+        };
+
+        let result = negotiate_audio_format(&formats, &requested);
+        // Should fail - 3 channels is not valid for Opus encoding
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_negotiate_audio_format_mp3_valid_sample_rate() {
+        // Provider supports PCM at 22050Hz, client wants MP3
+        // MP3 supports a wider range of sample rates than Opus
+        let formats = vec![AudioFormat {
+            codec: yappy_core::AudioCodec::Pcm,
+            sample_rate: 22050,
+            channels: 1,
+            bits_per_sample: Some(16),
+        }];
+
+        let requested = AudioFormat {
+            codec: yappy_core::AudioCodec::Mp3,
+            sample_rate: 22050,
+            channels: 1,
+            bits_per_sample: None,
+        };
+
+        let result = negotiate_audio_format(&formats, &requested);
+        // Should succeed - 22050Hz is valid for MP3
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().codec, yappy_core::AudioCodec::Mp3);
+    }
+
+    #[test]
+    fn test_is_format_supported_by_encoder_opus() {
+        // Valid Opus formats
+        assert!(is_format_supported_by_encoder(&AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 48000,
+            channels: 1,
+            bits_per_sample: None,
+        }));
+        assert!(is_format_supported_by_encoder(&AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 24000,
+            channels: 2,
+            bits_per_sample: None,
+        }));
+
+        // Invalid sample rate for Opus
+        assert!(!is_format_supported_by_encoder(&AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 22050,
+            channels: 1,
+            bits_per_sample: None,
+        }));
+
+        // Invalid channels for Opus
+        assert!(!is_format_supported_by_encoder(&AudioFormat {
+            codec: yappy_core::AudioCodec::Opus,
+            sample_rate: 48000,
+            channels: 3,
+            bits_per_sample: None,
+        }));
+    }
+
+    #[test]
+    fn test_is_format_supported_by_encoder_mp3() {
+        // Valid MP3 formats
+        assert!(is_format_supported_by_encoder(&AudioFormat {
+            codec: yappy_core::AudioCodec::Mp3,
+            sample_rate: 44100,
+            channels: 2,
+            bits_per_sample: None,
+        }));
+        assert!(is_format_supported_by_encoder(&AudioFormat {
+            codec: yappy_core::AudioCodec::Mp3,
+            sample_rate: 22050,
+            channels: 1,
+            bits_per_sample: None,
+        }));
+
+        // Invalid sample rate for MP3 (below range)
+        assert!(!is_format_supported_by_encoder(&AudioFormat {
+            codec: yappy_core::AudioCodec::Mp3,
+            sample_rate: 4000,
+            channels: 1,
+            bits_per_sample: None,
+        }));
+
+        // Invalid sample rate for MP3 (above range)
+        assert!(!is_format_supported_by_encoder(&AudioFormat {
+            codec: yappy_core::AudioCodec::Mp3,
+            sample_rate: 96000,
+            channels: 1,
+            bits_per_sample: None,
+        }));
     }
 
     /// Helper to create a provider registry with specific supported formats
