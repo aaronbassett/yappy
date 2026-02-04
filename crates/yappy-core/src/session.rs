@@ -180,7 +180,8 @@ pub enum CodeBlockMode {
 /// Voice configuration for synthesis
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceConfig {
-    /// Voice identifier
+    /// Voice identifier (empty string means use provider default)
+    #[serde(default)]
     pub id: String,
 
     /// Speech rate multiplier (0.5 - 2.0, default 1.0)
@@ -228,5 +229,71 @@ impl VoiceConfig {
             return Err("volume must be between 0.0 and 1.0");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that VoiceConfig can be deserialized with only speed specified (protocol contract)
+    #[test]
+    fn test_voice_config_partial_speed_only() {
+        let json = r#"{"speed": 1.5}"#;
+        let config: VoiceConfig = serde_json::from_str(json).unwrap();
+        assert!(config.id.is_empty()); // default empty string
+        assert!((config.speed - 1.5).abs() < f32::EPSILON);
+        assert!((config.pitch - 0.0).abs() < f32::EPSILON); // default
+        assert!((config.volume - 1.0).abs() < f32::EPSILON); // default
+    }
+
+    /// Test that VoiceConfig can be deserialized with only pitch specified
+    #[test]
+    fn test_voice_config_partial_pitch_only() {
+        let json = r#"{"pitch": 0.5}"#;
+        let config: VoiceConfig = serde_json::from_str(json).unwrap();
+        assert!(config.id.is_empty()); // default
+        assert!((config.speed - 1.0).abs() < f32::EPSILON); // default
+        assert!((config.pitch - 0.5).abs() < f32::EPSILON);
+        assert!((config.volume - 1.0).abs() < f32::EPSILON); // default
+    }
+
+    /// Test that empty VoiceConfig object deserializes with all defaults
+    #[test]
+    fn test_voice_config_empty_object() {
+        let json = r#"{}"#;
+        let config: VoiceConfig = serde_json::from_str(json).unwrap();
+        assert!(config.id.is_empty());
+        assert!((config.speed - 1.0).abs() < f32::EPSILON);
+        assert!((config.pitch - 0.0).abs() < f32::EPSILON);
+        assert!((config.volume - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// Test that VoiceConfig works with mixed specified and default fields
+    #[test]
+    fn test_voice_config_partial_mixed() {
+        let json = r#"{"id": "af_bella", "volume": 0.8}"#;
+        let config: VoiceConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.id, "af_bella");
+        assert!((config.speed - 1.0).abs() < f32::EPSILON); // default
+        assert!((config.pitch - 0.0).abs() < f32::EPSILON); // default
+        assert!((config.volume - 0.8).abs() < f32::EPSILON);
+    }
+
+    /// Test that VoiceConfig validation passes for defaults
+    #[test]
+    fn test_voice_config_default_validates() {
+        let config = VoiceConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    /// Test that VoiceConfig validation fails for out-of-range speed
+    #[test]
+    fn test_voice_config_validation_speed_out_of_range() {
+        let config = VoiceConfig {
+            speed: 3.0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
     }
 }

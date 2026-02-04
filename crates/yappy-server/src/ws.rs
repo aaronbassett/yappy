@@ -920,9 +920,16 @@ where
     let available_voice_ids: Vec<String> = metadata.voices.iter().map(|v| v.id.clone()).collect();
 
     // Resolve voice configuration (use default if not specified)
-    let voice = if let Some(requested) = requested_voice {
-        // Validate voice ID exists in provider's voice list
-        if !available_voice_ids.is_empty() && !available_voice_ids.contains(&requested.id) {
+    let voice = if let Some(mut requested) = requested_voice {
+        // If voice.id is empty, use provider default (per protocol contract)
+        if requested.id.is_empty() {
+            requested.id = metadata
+                .voices
+                .first()
+                .map(|v| v.id.clone())
+                .unwrap_or_default();
+        } else if !available_voice_ids.is_empty() && !available_voice_ids.contains(&requested.id) {
+            // Validate voice ID exists in provider's voice list
             let response = ServerMessage::session_error_with_alternatives(
                 "invalid_voice",
                 format!(

@@ -11,17 +11,28 @@ use crate::error::ProviderError;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioFormat {
     /// Codec (opus, pcm, mp3)
+    #[serde(default)]
     pub codec: AudioCodec,
 
     /// Sample rate in Hz (e.g., 24000, 48000)
+    #[serde(default = "default_sample_rate")]
     pub sample_rate: u32,
 
     /// Number of channels (1 = mono, 2 = stereo)
+    #[serde(default = "default_channels")]
     pub channels: u8,
 
     /// Bits per sample (for PCM)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bits_per_sample: Option<u8>,
+}
+
+const fn default_sample_rate() -> u32 {
+    48000
+}
+
+const fn default_channels() -> u8 {
+    1
 }
 
 impl Default for AudioFormat {
@@ -36,10 +47,11 @@ impl Default for AudioFormat {
 }
 
 /// Audio codec
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioCodec {
     /// Opus codec (default, good compression)
+    #[default]
     Opus,
     /// Raw PCM samples
     Pcm,
@@ -199,5 +211,45 @@ mod tests {
         // Exactly 12 bytes (valid - header only, no audio data)
         let just_header = Bytes::from_static(&[0; 12]);
         assert!(AudioChunk::from_binary_frame(&just_header).is_some());
+    }
+
+    /// Test that AudioFormat can be deserialized with only codec specified (protocol contract)
+    #[test]
+    fn test_audio_format_partial_codec_only() {
+        let json = r#"{"codec": "opus"}"#;
+        let format: AudioFormat = serde_json::from_str(json).unwrap();
+        assert_eq!(format.codec, AudioCodec::Opus);
+        assert_eq!(format.sample_rate, 48000); // default
+        assert_eq!(format.channels, 1); // default
+    }
+
+    /// Test that AudioFormat can be deserialized with only sample_rate specified
+    #[test]
+    fn test_audio_format_partial_sample_rate_only() {
+        let json = r#"{"sample_rate": 24000}"#;
+        let format: AudioFormat = serde_json::from_str(json).unwrap();
+        assert_eq!(format.codec, AudioCodec::Opus); // default
+        assert_eq!(format.sample_rate, 24000);
+        assert_eq!(format.channels, 1); // default
+    }
+
+    /// Test that empty AudioFormat object deserializes with all defaults
+    #[test]
+    fn test_audio_format_empty_object() {
+        let json = r#"{}"#;
+        let format: AudioFormat = serde_json::from_str(json).unwrap();
+        assert_eq!(format.codec, AudioCodec::Opus);
+        assert_eq!(format.sample_rate, 48000);
+        assert_eq!(format.channels, 1);
+    }
+
+    /// Test that AudioFormat works with mixed specified and default fields
+    #[test]
+    fn test_audio_format_partial_mixed() {
+        let json = r#"{"codec": "mp3", "channels": 2}"#;
+        let format: AudioFormat = serde_json::from_str(json).unwrap();
+        assert_eq!(format.codec, AudioCodec::Mp3);
+        assert_eq!(format.sample_rate, 48000); // default
+        assert_eq!(format.channels, 2);
     }
 }
