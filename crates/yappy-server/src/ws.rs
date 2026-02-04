@@ -55,9 +55,9 @@ use axum::{
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
+use tokio_util::bytes::Bytes;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, trace, warn, Span};
-use tokio_util::bytes::Bytes;
 use yappy_core::audio::AudioCodec;
 use yappy_core::buffer::{BufferConfig, Sentence};
 use yappy_core::provider::ProviderId;
@@ -495,11 +495,9 @@ where
                         chunk.sentence_index = sentence.index;
 
                         // Transcode if needed (native_format -> audio_format)
-                        let Ok(chunk) = transcode_chunk(
-                            chunk,
-                            &session.native_format,
-                            &session.audio_format,
-                        ) else {
+                        let Ok(chunk) =
+                            transcode_chunk(chunk, &session.native_format, &session.audio_format)
+                        else {
                             break; // Best effort during shutdown
                         };
 
@@ -1268,33 +1266,31 @@ where
                     chunk.sentence_index = sentence.index;
 
                     // Transcode if needed (native_format -> audio_format)
-                    let chunk = match transcode_chunk(
-                        chunk,
-                        &session.native_format,
-                        &session.audio_format,
-                    ) {
-                        Ok(transcoded) => transcoded,
-                        Err(err) => {
-                            warn!(
-                                session_id = %session.id,
-                                sentence_index = sentence.index,
-                                error = %err,
-                                "Transcoding failed for audio chunk"
-                            );
-                            let response = ServerMessage::error_with_sentence(
-                                "transcode_error",
-                                err.to_string(),
-                                sentence.index,
-                            );
-                            if let Err(send_err) =
-                                send_server_message(sender.inner_mut(), &response).await
-                            {
-                                warn!("Failed to send transcode error: {}", send_err);
-                                return false;
+                    let chunk =
+                        match transcode_chunk(chunk, &session.native_format, &session.audio_format)
+                        {
+                            Ok(transcoded) => transcoded,
+                            Err(err) => {
+                                warn!(
+                                    session_id = %session.id,
+                                    sentence_index = sentence.index,
+                                    error = %err,
+                                    "Transcoding failed for audio chunk"
+                                );
+                                let response = ServerMessage::error_with_sentence(
+                                    "transcode_error",
+                                    err.to_string(),
+                                    sentence.index,
+                                );
+                                if let Err(send_err) =
+                                    send_server_message(sender.inner_mut(), &response).await
+                                {
+                                    warn!("Failed to send transcode error: {}", send_err);
+                                    return false;
+                                }
+                                break;
                             }
-                            break;
-                        }
-                    };
+                        };
 
                     // Assign global sequence number from session (after transcoding, size may change)
                     let mut chunk = chunk;
@@ -1742,33 +1738,31 @@ where
                     chunk.sentence_index = sentence.index;
 
                     // Transcode if needed (native_format -> audio_format)
-                    let chunk = match transcode_chunk(
-                        chunk,
-                        &session.native_format,
-                        &session.audio_format,
-                    ) {
-                        Ok(transcoded) => transcoded,
-                        Err(err) => {
-                            warn!(
-                                session_id = %session.id,
-                                sentence_index = sentence.index,
-                                error = %err,
-                                "Transcoding failed for audio chunk"
-                            );
-                            let response = ServerMessage::error_with_sentence(
-                                "transcode_error",
-                                err.to_string(),
-                                sentence.index,
-                            );
-                            if let Err(send_err) =
-                                send_server_message(sender.inner_mut(), &response).await
-                            {
-                                warn!("Failed to send transcode error: {}", send_err);
-                                return false;
+                    let chunk =
+                        match transcode_chunk(chunk, &session.native_format, &session.audio_format)
+                        {
+                            Ok(transcoded) => transcoded,
+                            Err(err) => {
+                                warn!(
+                                    session_id = %session.id,
+                                    sentence_index = sentence.index,
+                                    error = %err,
+                                    "Transcoding failed for audio chunk"
+                                );
+                                let response = ServerMessage::error_with_sentence(
+                                    "transcode_error",
+                                    err.to_string(),
+                                    sentence.index,
+                                );
+                                if let Err(send_err) =
+                                    send_server_message(sender.inner_mut(), &response).await
+                                {
+                                    warn!("Failed to send transcode error: {}", send_err);
+                                    return false;
+                                }
+                                break;
                             }
-                            break;
-                        }
-                    };
+                        };
 
                     // Record stats after transcoding (size may have changed)
                     let mut chunk = chunk;
@@ -1982,33 +1976,31 @@ where
                     chunk.sentence_index = sentence.index;
 
                     // Transcode if needed (native_format -> audio_format)
-                    let chunk = match transcode_chunk(
-                        chunk,
-                        &session.native_format,
-                        &session.audio_format,
-                    ) {
-                        Ok(transcoded) => transcoded,
-                        Err(err) => {
-                            warn!(
-                                session_id = %session.id,
-                                sentence_index = sentence.index,
-                                error = %err,
-                                "Transcoding failed for audio chunk"
-                            );
-                            let response = ServerMessage::error_with_sentence(
-                                "transcode_error",
-                                err.to_string(),
-                                sentence.index,
-                            );
-                            if let Err(send_err) =
-                                send_server_message(sender.inner_mut(), &response).await
-                            {
-                                warn!("Failed to send transcode error: {}", send_err);
-                                return false;
+                    let chunk =
+                        match transcode_chunk(chunk, &session.native_format, &session.audio_format)
+                        {
+                            Ok(transcoded) => transcoded,
+                            Err(err) => {
+                                warn!(
+                                    session_id = %session.id,
+                                    sentence_index = sentence.index,
+                                    error = %err,
+                                    "Transcoding failed for audio chunk"
+                                );
+                                let response = ServerMessage::error_with_sentence(
+                                    "transcode_error",
+                                    err.to_string(),
+                                    sentence.index,
+                                );
+                                if let Err(send_err) =
+                                    send_server_message(sender.inner_mut(), &response).await
+                                {
+                                    warn!("Failed to send transcode error: {}", send_err);
+                                    return false;
+                                }
+                                break;
                             }
-                            break;
-                        }
-                    };
+                        };
 
                     // Record stats after transcoding (size may have changed)
                     let mut chunk = chunk;
