@@ -195,11 +195,7 @@ impl ProviderRegistry {
             })
             .collect();
 
-        join_all(futures)
-            .await
-            .into_iter()
-            .flatten()
-            .collect()
+        join_all(futures).await.into_iter().flatten().collect()
     }
 
     /// Check if the registry contains a provider with the given ID
