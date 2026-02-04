@@ -2033,12 +2033,14 @@ where
             }
         };
 
-        // Stream audio chunks with per-chunk timeout monitoring
+        // Stream audio chunks with per-chunk idle timeout
+        // The timeout applies to each chunk retrieval, not the total streaming duration.
+        // This ensures long but healthy streams don't timeout, while stalled providers
+        // are detected promptly. Backpressure from slow clients doesn't affect the timeout.
         let mut audio_stream = audio_stream;
-        let chunk_start = Instant::now();
 
-        while let Some(chunk_result) = audio_stream.next().await {
-            // Check for cancellation during streaming
+        loop {
+            // Check for cancellation before waiting for next chunk
             if cancel_token.is_cancelled() {
                 debug!(
                     session_id = %session.id,
@@ -2048,29 +2050,32 @@ where
                 return true;
             }
 
-            // Check if streaming has exceeded the timeout (for long audio streams)
-            if chunk_start.elapsed() > timeout {
-                warn!(
-                    session_id = %session.id,
-                    sentence_index = sentence.index,
-                    elapsed_secs = chunk_start.elapsed().as_secs(),
-                    "Audio streaming timeout for sentence"
-                );
+            // Apply timeout to provider chunk generation, not total stream duration
+            let chunk_result = match tokio::time::timeout(timeout, audio_stream.next()).await {
+                Ok(Some(result)) => result,
+                Ok(None) => break, // Stream ended normally
+                Err(_elapsed) => {
+                    // Per-chunk idle timeout exceeded
+                    warn!(
+                        session_id = %session.id,
+                        sentence_index = sentence.index,
+                        timeout_secs = timeout.as_secs(),
+                        "Audio chunk timeout for sentence"
+                    );
 
-                let response = ServerMessage::error_with_sentence(
-                    "synthesis_failed",
-                    format!(
-                        "Audio streaming timed out after {} seconds",
-                        chunk_start.elapsed().as_secs()
-                    ),
-                    sentence.index,
-                );
-                if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
-                    warn!("Failed to send streaming timeout error: {}", send_err);
-                    return false;
+                    let response = ServerMessage::error_with_sentence(
+                        "synthesis_failed",
+                        format!("Audio chunk timed out after {} seconds", timeout.as_secs()),
+                        sentence.index,
+                    );
+                    if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await
+                    {
+                        warn!("Failed to send streaming timeout error: {}", send_err);
+                        return false;
+                    }
+                    break;
                 }
-                break;
-            }
+            };
 
             match chunk_result {
                 Ok(mut chunk) => {
