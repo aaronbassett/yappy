@@ -55,8 +55,15 @@ pub struct Session {
     /// Selected voice configuration
     pub voice: VoiceConfig,
 
-    /// Negotiated audio output format
+    /// Negotiated audio output format (what the client requested)
     pub audio_format: AudioFormat,
+
+    /// Native format from the TTS provider (used for synthesis)
+    ///
+    /// This is the format the provider actually produces. When this differs
+    /// from `audio_format`, the server transcodes from `native_format` to
+    /// `audio_format` before sending to the client.
+    pub native_format: AudioFormat,
 
     /// Sentence buffer for text accumulation
     pub buffer: SentenceBuffer,
@@ -85,10 +92,19 @@ pub struct Session {
 
 impl Session {
     /// Create a new session
+    ///
+    /// # Arguments
+    ///
+    /// * `provider_id` - The TTS provider to use
+    /// * `voice` - Voice configuration
+    /// * `audio_format` - The format requested by the client (output format)
+    /// * `native_format` - The format the provider natively produces (input to transcoder)
+    /// * `code_block_mode` - How to handle code blocks in text
     pub fn new(
         provider_id: ProviderId,
         voice: VoiceConfig,
         audio_format: AudioFormat,
+        native_format: AudioFormat,
         code_block_mode: CodeBlockMode,
     ) -> Self {
         let now = Instant::now();
@@ -97,6 +113,7 @@ impl Session {
             provider_id,
             voice,
             audio_format,
+            native_format,
             buffer: SentenceBuffer::default(),
             created_at: now,
             last_activity: now,
@@ -125,10 +142,20 @@ impl Session {
     }
 
     /// Create a new session with custom buffer configuration
+    ///
+    /// # Arguments
+    ///
+    /// * `provider_id` - The TTS provider to use
+    /// * `voice` - Voice configuration
+    /// * `audio_format` - The format requested by the client (output format)
+    /// * `native_format` - The format the provider natively produces (input to transcoder)
+    /// * `code_block_mode` - How to handle code blocks in text
+    /// * `buffer_config` - Sentence buffer configuration
     pub fn with_buffer_config(
         provider_id: ProviderId,
         voice: VoiceConfig,
         audio_format: AudioFormat,
+        native_format: AudioFormat,
         code_block_mode: CodeBlockMode,
         buffer_config: BufferConfig,
     ) -> Self {
@@ -138,6 +165,7 @@ impl Session {
             provider_id,
             voice,
             audio_format,
+            native_format,
             buffer: SentenceBuffer::new(buffer_config),
             created_at: now,
             last_activity: now,
@@ -147,6 +175,14 @@ impl Session {
             total_bytes: 0,
             audio_sequence: 0,
         }
+    }
+
+    /// Check if transcoding is needed for this session.
+    ///
+    /// Returns `true` if the provider's native format differs from the
+    /// client's requested format and transcoding is required.
+    pub fn needs_transcoding(&self) -> bool {
+        self.native_format.codec != self.audio_format.codec
     }
 }
 

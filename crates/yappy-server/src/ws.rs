@@ -57,13 +57,14 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, trace, warn, Span};
+use tokio_util::bytes::Bytes;
 use yappy_core::audio::AudioCodec;
 use yappy_core::buffer::{BufferConfig, Sentence};
 use yappy_core::provider::ProviderId;
-use yappy_core::transcode::Transcoder;
+use yappy_core::transcode::{TranscodeError, Transcoder};
 use yappy_core::{
-    AudioFormat, ClientMessage, CodeBlockMode, ServerMessage, Session, SessionState, TtsProvider,
-    VoiceConfig,
+    AudioChunk, AudioFormat, ClientMessage, CodeBlockMode, ServerMessage, Session, SessionState,
+    TtsProvider, VoiceConfig,
 };
 
 use crate::shutdown::SessionGuard;
@@ -478,11 +479,12 @@ where
             // even though we're shutting down (graceful completion)
             let cancel_token = CancellationToken::new();
 
+            // Request audio in the provider's native format
             if let Ok(mut audio_stream) = provider
                 .synthesize(
                     &sentence.text,
                     &session.voice,
-                    session.audio_format.clone(),
+                    session.native_format.clone(),
                     cancel_token,
                 )
                 .await
@@ -490,9 +492,21 @@ where
                 // Stream the audio chunks
                 while let Some(chunk_result) = audio_stream.next().await {
                     if let Ok(mut chunk) = chunk_result {
+                        chunk.sentence_index = sentence.index;
+
+                        // Transcode if needed (native_format -> audio_format)
+                        let Ok(chunk) = transcode_chunk(
+                            chunk,
+                            &session.native_format,
+                            &session.audio_format,
+                        ) else {
+                            break; // Best effort during shutdown
+                        };
+
+                        // Record stats after transcoding
+                        let mut chunk = chunk;
                         chunk.sequence =
                             session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
-                        chunk.sentence_index = sentence.index;
 
                         let frame = chunk.to_binary_frame();
                         if sender.send_binary(frame.to_vec()).await.is_err() {
@@ -971,7 +985,7 @@ where
     };
 
     // Resolve and validate audio format
-    let audio_format = if let Some(requested) = requested_format {
+    let negotiated = if let Some(requested) = requested_format {
         // Client requested a specific format - validate it
         let Some(resolved) = negotiate_audio_format(&metadata.supported_formats, &requested) else {
             // Format cannot be provided (not native and can't transcode)
@@ -997,16 +1011,29 @@ where
         };
         resolved
     } else {
-        // Use provider's default format (first in supported_formats)
-        metadata
+        // Use provider's default format (first in supported_formats) - no transcoding
+        let default_format = metadata
             .supported_formats
             .first()
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        NegotiatedFormat {
+            output_format: default_format.clone(),
+            native_format: default_format,
+        }
     };
 
     // Resolve code block mode
     let code_block_mode = requested_code_block_mode.unwrap_or_default();
+
+    // Log if transcoding will be used
+    if negotiated.needs_transcoding() {
+        debug!(
+            native_codec = %negotiated.native_format.codec,
+            output_codec = %negotiated.output_format.codec,
+            "Session will use transcoding"
+        );
+    }
 
     // Create the session with the configured buffer settings.
     //
@@ -1019,7 +1046,8 @@ where
     let new_session = Session::with_buffer_config(
         provider_id,
         voice.clone(),
-        audio_format.clone(),
+        negotiated.output_format.clone(),
+        negotiated.native_format.clone(),
         code_block_mode,
         buffer_config.clone(),
     );
@@ -1047,12 +1075,14 @@ where
         session_id = %session_id,
         provider = %new_session.provider_id,
         voice = %voice.id,
-        audio_codec = %audio_format.codec,
+        audio_codec = %negotiated.output_format.codec,
+        native_codec = %negotiated.native_format.codec,
+        transcoding = negotiated.needs_transcoding(),
         "Session initialized"
     );
 
-    // Send session.ready response
-    let response = ServerMessage::session_ready(&session_id, audio_format, &voice.id);
+    // Send session.ready response (with the output format the client will receive)
+    let response = ServerMessage::session_ready(&session_id, negotiated.output_format, &voice.id);
     if let Err(err) = send_server_message(sender, &response).await {
         warn!("Failed to send session.ready: {err}");
         return false;
@@ -1175,6 +1205,7 @@ where
 /// This function implements FR-020 backpressure. When the bounded audio channel
 /// is full (client is slow consuming audio), the synthesis will pause until
 /// the channel has capacity. This prevents unbounded memory growth.
+#[allow(clippy::too_many_lines)]
 #[cfg_attr(not(test), allow(dead_code))]
 async fn synthesize_and_stream<S>(
     sentences: Vec<Sentence>,
@@ -1197,12 +1228,12 @@ where
         // TODO: In the future, wire this to client disconnection or explicit cancel
         let cancel_token = CancellationToken::new();
 
-        // Call the provider to synthesize audio
+        // Call the provider to synthesize audio in the native format
         let audio_stream = match provider
             .synthesize(
                 &sentence.text,
                 &session.voice,
-                session.audio_format.clone(),
+                session.native_format.clone(),
                 cancel_token,
             )
             .await
@@ -1233,12 +1264,42 @@ where
         while let Some(chunk_result) = audio_stream.next().await {
             match chunk_result {
                 Ok(mut chunk) => {
-                    // Assign global sequence number from session
-                    chunk.sequence =
-                        session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
-
                     // Ensure sentence_index matches our tracked sentence
                     chunk.sentence_index = sentence.index;
+
+                    // Transcode if needed (native_format -> audio_format)
+                    let chunk = match transcode_chunk(
+                        chunk,
+                        &session.native_format,
+                        &session.audio_format,
+                    ) {
+                        Ok(transcoded) => transcoded,
+                        Err(err) => {
+                            warn!(
+                                session_id = %session.id,
+                                sentence_index = sentence.index,
+                                error = %err,
+                                "Transcoding failed for audio chunk"
+                            );
+                            let response = ServerMessage::error_with_sentence(
+                                "transcode_error",
+                                err.to_string(),
+                                sentence.index,
+                            );
+                            if let Err(send_err) =
+                                send_server_message(sender.inner_mut(), &response).await
+                            {
+                                warn!("Failed to send transcode error: {}", send_err);
+                                return false;
+                            }
+                            break;
+                        }
+                    };
+
+                    // Assign global sequence number from session (after transcoding, size may change)
+                    let mut chunk = chunk;
+                    chunk.sequence =
+                        session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
 
                     debug!(
                         session_id = %session.id,
@@ -1625,11 +1686,12 @@ where
         // Create a child cancellation token that will be cancelled on shutdown
         let cancel_token = session_guard.child_token();
 
+        // Request audio in the provider's native format (transcoding happens later if needed)
         let audio_stream = match provider
             .synthesize(
                 &sentence.text,
                 &session.voice,
-                session.audio_format.clone(),
+                session.native_format.clone(),
                 cancel_token.clone(),
             )
             .await
@@ -1677,9 +1739,41 @@ where
 
             match chunk_result {
                 Ok(mut chunk) => {
+                    chunk.sentence_index = sentence.index;
+
+                    // Transcode if needed (native_format -> audio_format)
+                    let chunk = match transcode_chunk(
+                        chunk,
+                        &session.native_format,
+                        &session.audio_format,
+                    ) {
+                        Ok(transcoded) => transcoded,
+                        Err(err) => {
+                            warn!(
+                                session_id = %session.id,
+                                sentence_index = sentence.index,
+                                error = %err,
+                                "Transcoding failed for audio chunk"
+                            );
+                            let response = ServerMessage::error_with_sentence(
+                                "transcode_error",
+                                err.to_string(),
+                                sentence.index,
+                            );
+                            if let Err(send_err) =
+                                send_server_message(sender.inner_mut(), &response).await
+                            {
+                                warn!("Failed to send transcode error: {}", send_err);
+                                return false;
+                            }
+                            break;
+                        }
+                    };
+
+                    // Record stats after transcoding (size may have changed)
+                    let mut chunk = chunk;
                     chunk.sequence =
                         session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
-                    chunk.sentence_index = sentence.index;
 
                     debug!(
                         session_id = %session.id,
@@ -1782,12 +1876,13 @@ where
         let cancel_token = session_guard.child_token();
 
         // Wrap the synthesis call with a timeout (T296)
+        // Request audio in the provider's native format (transcoding happens later if needed)
         let synthesis_result = tokio::time::timeout(
             timeout,
             provider.synthesize(
                 &sentence.text,
                 &session.voice,
-                session.audio_format.clone(),
+                session.native_format.clone(),
                 cancel_token.clone(),
             ),
         )
@@ -1884,9 +1979,41 @@ where
 
             match chunk_result {
                 Ok(mut chunk) => {
+                    chunk.sentence_index = sentence.index;
+
+                    // Transcode if needed (native_format -> audio_format)
+                    let chunk = match transcode_chunk(
+                        chunk,
+                        &session.native_format,
+                        &session.audio_format,
+                    ) {
+                        Ok(transcoded) => transcoded,
+                        Err(err) => {
+                            warn!(
+                                session_id = %session.id,
+                                sentence_index = sentence.index,
+                                error = %err,
+                                "Transcoding failed for audio chunk"
+                            );
+                            let response = ServerMessage::error_with_sentence(
+                                "transcode_error",
+                                err.to_string(),
+                                sentence.index,
+                            );
+                            if let Err(send_err) =
+                                send_server_message(sender.inner_mut(), &response).await
+                            {
+                                warn!("Failed to send transcode error: {}", send_err);
+                                return false;
+                            }
+                            break;
+                        }
+                    };
+
+                    // Record stats after transcoding (size may have changed)
+                    let mut chunk = chunk;
                     chunk.sequence =
                         session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
-                    chunk.sentence_index = sentence.index;
 
                     debug!(
                         session_id = %session.id,
@@ -2443,6 +2570,25 @@ where
     }
 }
 
+/// Result of audio format negotiation.
+///
+/// Contains both the output format (what client requested) and the native format
+/// (what the provider produces). When these differ, transcoding is required.
+#[derive(Debug, Clone)]
+struct NegotiatedFormat {
+    /// The format requested by the client (output format after transcoding, if any)
+    output_format: AudioFormat,
+    /// The format the provider natively produces (input to transcoder)
+    native_format: AudioFormat,
+}
+
+impl NegotiatedFormat {
+    /// Check if transcoding is required.
+    fn needs_transcoding(&self) -> bool {
+        self.native_format.codec != self.output_format.codec
+    }
+}
+
 /// Negotiate audio format based on provider capabilities and transcoding.
 ///
 /// This function determines if the requested audio format can be provided,
@@ -2455,15 +2601,15 @@ where
 ///
 /// # Returns
 ///
-/// Returns `Some(AudioFormat)` if the format can be provided:
-/// - The requested format if natively supported
-/// - The requested format if the provider supports PCM and transcoding is available
+/// Returns `Some(NegotiatedFormat)` if the format can be provided:
+/// - Native format matches requested: both formats are the same
+/// - Transcoding required: `native_format` is PCM, `output_format` is requested
 ///
 /// Returns `None` if the format cannot be provided.
 fn negotiate_audio_format(
     supported_formats: &[AudioFormat],
     requested: &AudioFormat,
-) -> Option<AudioFormat> {
+) -> Option<NegotiatedFormat> {
     // Check if there's a native format that matches the requested format
     // (codec, sample_rate, channels, and bits_per_sample must all be compatible)
     let native_match = supported_formats.iter().find(|f| {
@@ -2475,9 +2621,12 @@ fn negotiate_audio_format(
                 || requested.bits_per_sample.is_none())
     });
 
-    if native_match.is_some() {
-        // Provider natively supports this exact format
-        return Some(requested.clone());
+    if let Some(native) = native_match {
+        // Provider natively supports this exact format - no transcoding needed
+        return Some(NegotiatedFormat {
+            output_format: requested.clone(),
+            native_format: native.clone(),
+        });
     }
 
     // Check if we can transcode from PCM to the requested format
@@ -2488,11 +2637,16 @@ fn negotiate_audio_format(
             && f.channels == requested.channels
     });
 
-    if compatible_pcm.is_some() && Transcoder::can_transcode(AudioCodec::Pcm, requested.codec) {
-        // Validate that the requested format parameters are supported by the target encoder
-        if is_format_supported_by_encoder(requested) {
-            // We can transcode from PCM to the requested format
-            return Some(requested.clone());
+    if let Some(pcm_format) = compatible_pcm {
+        if Transcoder::can_transcode(AudioCodec::Pcm, requested.codec) {
+            // Validate that the requested format parameters are supported by the target encoder
+            if is_format_supported_by_encoder(requested) {
+                // We can transcode from PCM to the requested format
+                return Some(NegotiatedFormat {
+                    output_format: requested.clone(),
+                    native_format: pcm_format.clone(),
+                });
+            }
         }
     }
 
@@ -2525,6 +2679,45 @@ fn is_format_supported_by_encoder(format: &AudioFormat) -> bool {
             true
         }
     }
+}
+
+/// Transcode an audio chunk from native format to output format.
+///
+/// This function converts audio data from the provider's native format to the
+/// client's requested output format. If the formats are the same (no transcoding
+/// needed), the chunk is returned unchanged.
+///
+/// # Arguments
+///
+/// * `chunk` - The audio chunk with data in native format
+/// * `native_format` - The format the provider produced (input)
+/// * `output_format` - The format requested by the client (output)
+///
+/// # Returns
+///
+/// Returns the chunk with transcoded data, or the original chunk if no
+/// transcoding was needed.
+///
+/// # Errors
+///
+/// Returns `TranscodeError` if transcoding fails.
+fn transcode_chunk(
+    mut chunk: AudioChunk,
+    native_format: &AudioFormat,
+    output_format: &AudioFormat,
+) -> Result<AudioChunk, TranscodeError> {
+    // If formats match, no transcoding needed
+    if native_format.codec == output_format.codec {
+        return Ok(chunk);
+    }
+
+    // Transcode the audio data
+    let transcoded_data = Transcoder::transcode(&chunk.data, native_format, output_format)?;
+
+    // Update chunk with transcoded data
+    chunk.data = Bytes::from(transcoded_data);
+
+    Ok(chunk)
 }
 
 #[cfg(test)]
@@ -3469,7 +3662,11 @@ mod tests {
 
         let result = negotiate_audio_format(&formats, &requested);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().codec, yappy_core::AudioCodec::Opus);
+        let negotiated = result.unwrap();
+        // Native format matches requested - no transcoding needed
+        assert_eq!(negotiated.output_format.codec, yappy_core::AudioCodec::Opus);
+        assert_eq!(negotiated.native_format.codec, yappy_core::AudioCodec::Opus);
+        assert!(!negotiated.needs_transcoding());
     }
 
     #[test]
@@ -3491,7 +3688,11 @@ mod tests {
 
         let result = negotiate_audio_format(&formats, &requested);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().codec, yappy_core::AudioCodec::Opus);
+        let negotiated = result.unwrap();
+        // Output is Opus (what client requested), native is PCM (what provider produces)
+        assert_eq!(negotiated.output_format.codec, yappy_core::AudioCodec::Opus);
+        assert_eq!(negotiated.native_format.codec, yappy_core::AudioCodec::Pcm);
+        assert!(negotiated.needs_transcoding());
     }
 
     #[test]
@@ -3513,7 +3714,11 @@ mod tests {
 
         let result = negotiate_audio_format(&formats, &requested);
         assert!(result.is_some());
-        assert_eq!(result.unwrap().codec, yappy_core::AudioCodec::Mp3);
+        let negotiated = result.unwrap();
+        // Output is MP3 (what client requested), native is PCM (what provider produces)
+        assert_eq!(negotiated.output_format.codec, yappy_core::AudioCodec::Mp3);
+        assert_eq!(negotiated.native_format.codec, yappy_core::AudioCodec::Pcm);
+        assert!(negotiated.needs_transcoding());
     }
 
     #[test]
@@ -3669,7 +3874,10 @@ mod tests {
         let result = negotiate_audio_format(&formats, &requested);
         // Should succeed - 22050Hz is valid for MP3
         assert!(result.is_some());
-        assert_eq!(result.unwrap().codec, yappy_core::AudioCodec::Mp3);
+        let negotiated = result.unwrap();
+        assert_eq!(negotiated.output_format.codec, yappy_core::AudioCodec::Mp3);
+        assert_eq!(negotiated.native_format.codec, yappy_core::AudioCodec::Pcm);
+        assert!(negotiated.needs_transcoding());
     }
 
     #[test]
