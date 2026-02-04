@@ -39,7 +39,7 @@ clap = { workspace = true }
 # Utilities
 anyhow = { workspace = true }
 tokio-util = { workspace = true }
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
 
 [dev-dependencies]
 async-trait = { workspace = true }

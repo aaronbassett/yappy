@@ -168,23 +168,38 @@ impl ProviderRegistry {
     /// Get list of available (healthy) providers
     ///
     /// This method checks the health status of each registered provider
-    /// and returns only those that are currently available.
+    /// and returns only those that are currently available. Health checks
+    /// are performed concurrently using `futures::future::join_all`.
     ///
     /// # Note
     ///
     /// This is an async method because it calls `health_check()` on each
     /// provider, which may perform I/O operations.
     pub async fn available_providers(&self) -> Vec<ProviderId> {
-        let mut available: Vec<ProviderId> = Vec::new();
+        use futures_util::future::join_all;
 
-        for (id, provider) in &self.providers {
-            let status: ProviderStatus = provider.health_check().await;
-            if status.is_available() {
-                available.push(id.clone());
-            }
-        }
+        let futures: Vec<_> = self
+            .providers
+            .iter()
+            .map(|(id, provider)| {
+                let id = id.clone();
+                let provider = provider.clone();
+                async move {
+                    let status = provider.health_check().await;
+                    if status.is_available() {
+                        Some(id)
+                    } else {
+                        None
+                    }
+                }
+            })
+            .collect();
 
-        available
+        join_all(futures)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// Check if the registry contains a provider with the given ID
