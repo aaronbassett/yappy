@@ -61,6 +61,12 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = yappy_core::Config::load(&args.config)?;
 
+    // Validate configuration - fail fast if invalid (FR-014)
+    config.validate().map_err(|e| {
+        error!(error = %e, "Configuration validation failed");
+        anyhow::anyhow!("Configuration validation failed: {e}")
+    })?;
+
     // Apply CLI overrides
     let host = args.host.unwrap_or_else(|| config.server.host.clone());
     let port = args.port.unwrap_or(config.server.port);
