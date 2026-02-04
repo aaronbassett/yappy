@@ -1,0 +1,28 @@
+[package]
+name = "yappy-provider-kokoro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Kokoro ONNX TTS provider for Yappy"
+
+[dependencies]
+yappy-core = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+
+# ONNX inference
+ort = { workspace = true }
+hf-hub = { workspace = true }
+
+# Audio processing and streaming
+bytes = { workspace = true }
+futures = { workspace = true }
+
+# Audio encoding
+audiopus = { workspace = true }
+
+[lints]
+workspace = true

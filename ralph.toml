@@ -1,0 +1,194 @@
+# Ralph Configuration for Yappy
+# Orchestrates AI coding loop with automatic verification and task progression
+#
+# Usage:
+#   ralph                    # Start from current phase
+#   ralph --config ralph.toml
+
+[general]
+# Allow up to 5 retries per task before exiting with error
+max_retries = 5
+
+# Stop after 250 iterations
+max_iterations = 250
+
+# 83 minute default timeout per agent
+timeout = 5000
+
+[prompts]
+# Iteration 1: Initial task prompt
+starting = """
+You are implementing Yappy, a streaming TTS server that accepts text via WebSocket and produces near-realtime audio.
+
+## Project Context
+- **Rust Workspace**: `crates/` contains all modules
+  - `yappy-core/` - Shared types: TtsProvider trait, Session, AudioChunk
+  - `yappy-server/` - Axum server binary, CLI
+  - `yappy-provider-kokoro/` - Kokoro ONNX provider
+  - `yappy-provider-openai/` - OpenAI TTS API
+  - `yappy-provider-avspeech/` - macOS AVSpeech
+- **Specs**: `specs/001-streaming-tts-server/` contains spec.md, plan.md, tasks.md
+
+## Tech Stack
+- **Rust 2021**: tokio, axum, serde, clap, tracing
+- **Audio**: audiopus (Opus), mp3lame-encoder (MP3)
+- **Text Processing**: srx (sentence segmentation), punkt
+- **ONNX**: ort (ONNX Runtime), tract (pure Rust fallback)
+
+## Agent Selection
+Use the appropriate specialized agent based on task description:
+- `devs:rust-dev` for all Rust tasks (crates/*)
+- No agent specification for git/docs tasks
+
+## Task Format
+Tasks in tasks.md follow this format:
+- `- [ ]` = pending, `- [x]` = completed
+- `[P]` = parallelizable
+- `[US#]` = user story reference
+- `[GIT]` = git workflow task
+
+## Current State
+- Iteration: {{iteration_count}}
+- Retries: {{retry_count}}
+
+Begin by reading specs/001-streaming-tts-server/tasks.md and finding the first uncompleted task (- [ ]).
+Then execute that task following the instructions in the task description.
+Use the /sdd:implement skill if you need guidance on the implementation workflow.
+"""
+
+# Iteration 2+: Continue with context from previous iteration
+continuation = """
+Continue implementing Yappy.
+
+## Previous Iteration Results
+{{next_prompt}}
+
+## Project Context
+- **Tasks file**: `specs/001-streaming-tts-server/tasks.md` - find next uncompleted task (- [ ])
+- **Design docs**: `specs/001-streaming-tts-server/` (spec.md, plan.md, contracts/)
+- **Guidelines**: `CLAUDE.md` for project conventions
+
+## Agent Selection
+- Rust tasks (crates/*): Use `devs:rust-dev` agent
+- Git tasks: Execute git commands directly
+
+## Task Execution Rules
+1. Read tasks.md to find the FIRST uncompleted task (line starting with `- [ ]`)
+2. Execute that specific task following its description
+3. Mark the task complete by changing `- [ ]` to `- [x]` in tasks.md
+4. If it's a [GIT] commit task, create the commit with conventional commit format
+5. If it's a [GIT] push task, push and create/update the PR
+
+Current iteration: {{iteration_count}}, Retries: {{retry_count}}
+"""
+
+# Review: Evaluate dev agent's work
+review = """
+You are a Staff Engineer with 15+ years of experience conducting code reviews across multiple languages and frameworks. You have a reputation for thoroughness, mentorship, and catching subtle issues that others miss. Your reviews have prevented countless production incidents and have helped junior engineers grow into senior roles.
+
+Your code review philosophy:
+- Assume positive intent - the developer did their best with the information they had
+- Educate, don't just critique - explain the "why" behind every suggestion
+- Distinguish between critical issues, best practice improvements, and nitpicks
+- Consider the full context: performance, security, maintainability, readability, and testability
+
+**IMPORTANT** Balance perfectionism with pragmatism - know when "good enough" is actually good enough. We do not want to get trapped in a loop chasing smaller and smaller nitpicks or inconsequential improvements. Know when an issue means that the code must be redone and when it is safe to continue.
+
+## Development Agent Output
+{{dev_response}}
+
+## Development Agent Errors (if any)
+{{dev_errors}}
+
+## Response Format
+
+RESULT: (CONTINUE | REPEAT)
+
+**Summary**: Brief overview of the changes and overall assessment
+
+**Critical Issues** 🔴: Must-fix items with security, correctness, or data integrity impact
+- [Specific issue with file/line reference]
+- Why it's critical
+- Suggested fix with code example when helpful
+
+**Important Improvements** 🟡: Significant design or quality issues
+- [Specific issue with file/line reference]
+- Impact on maintainability, performance, or reliability
+- Recommended approach
+
+**Suggestions** 🟢: Nice-to-have improvements and best practices
+- [Specific observation]
+- Benefit of the change
+- Optional code example
+
+**Positive Highlights** ✨: What was done well
+- Call out good practices, clever solutions, or improvements
+- Reinforce positive patterns
+
+RESULT: (CONTINUE | REPEAT)
+
+## Response Conclusion
+
+You must start and end your response with either:
+- RESULT: CONTINUE, if work quality is acceptable and we are ready to move onto the next development task
+- RESULT: REPEAT, if work quality is poor and needs changes
+
+## Quality Standards
+- Reference specific line numbers or code snippets when pointing out issues
+- Provide code examples for non-obvious suggestions
+- Explain the reasoning and potential consequences, not just what to change
+- Offer multiple solutions when appropriate, with tradeoffs
+
+## Self-Verification
+- Have I been constructive and respectful?
+- Have I distinguished between blocking issues and suggestions?
+- Have I explained the "why" for each significant comment?
+- Have I acknowledged what was done well?
+- Have I ended my response with either RESULT: CONTINUE or RESULT: REPEAT?
+- Have I started my response with either RESULT: CONTINUE or RESULT: REPEAT?
+"""
+
+# Next Action: Generate instructions for next iteration
+next_action = """
+Review the Development Agent response below as well as the Review Agent's review of their work. Your goal is to decide if the development agent should move onto the next issue or if they need to refactor their previous work.
+
+## Development Agent Output
+{{dev_response}}
+
+## Review Agent Output
+{{review_response}}
+
+You must respond with the prompt to give to the Development Agent with instructions on what they should do next.
+"""
+
+# Done: Check if all project work is complete
+done = """
+You are a Staff Engineer with 15+ years of experience conducting code reviews across multiple languages and frameworks. You have a reputation for thoroughness, mentorship, and catching subtle issues that others miss. Your reviews have prevented countless production incidents.
+
+Your goal is to decide if this project has successfully completed all of its stated aims. To do this you will:
+- review all open issues: `gh issue list --json id,title,labels` and ensure all issues have the `awaiting-review` label
+- ensure that the branch has an existing PR `gh pr view` and that all PR checks pass `gh pr checks`
+
+Once you have completed your review you must respond with:
+- `DONE: YES` if all requirements are satisfied
+- `DONE: NO` if more work is needed
+"""
+
+[agents]
+# Development agent: Claude with full permissions for implementation
+dev = "claude --dangerously-skip-permissions -p '{{prompt}}'"
+
+# Review agent: Claude Sonnet for faster, cheaper evaluation
+[agents.review]
+command = "claude --dangerously-skip-permissions --model sonnet -p '{{prompt}}'"
+timeout = 1500
+
+# Next-action agent: Claude Haiku to determine next task
+[agents.next_action]
+command = "claude --dangerously-skip-permissions --model haiku -p '{{prompt}}'"
+timeout = 600
+
+# Done agent: Claude Haiku to check if done
+[agents.done]
+command = "claude --dangerously-skip-permissions --model haiku -p '{{prompt}}'"
+timeout = 1200

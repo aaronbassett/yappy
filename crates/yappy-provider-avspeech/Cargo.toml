@@ -1,0 +1,23 @@
+[package]
+name = "yappy-provider-avspeech"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "macOS AVSpeechSynthesizer provider for Yappy (work in progress)"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+yappy-core = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tokio-util = { workspace = true }
+
+# Note: objc2-avf-audio dependencies will be added when full implementation is complete
+# objc2 = "0.6"
+# objc2-foundation = { version = "0.3", features = ["NSArray", "NSString", "NSDictionary", "NSObject", "NSError"] }
+# objc2-avf-audio = { version = "0.3", features = ["AVAudioBuffer", "AVSpeechSynthesis", "block2"] }
+# block2 = "0.6"
+
+[lints]
+workspace = true
