@@ -64,7 +64,7 @@ use yappy_core::provider::ProviderId;
 use yappy_core::transcode::{TranscodeError, Transcoder};
 use yappy_core::{
     AudioChunk, AudioFormat, ClientMessage, CodeBlockMode, ServerMessage, Session, SessionState,
-    TtsProvider, VoiceConfig,
+    VoiceConfig,
 };
 
 use crate::shutdown::SessionGuard;
@@ -371,27 +371,19 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 "Flushed buffer due to timeout (no sentence boundary detected)"
                             );
 
-                            // Synthesize the flushed sentence with cancellation support
-                            if let Some(provider) = state.providers().get(&session.provider_id) {
-                                if !synthesize_and_stream_with_timeout(
-                                    vec![sentence],
-                                    session,
-                                    &mut bp_sender,
-                                    provider.as_ref(),
-                                    &session_guard,
-                                    synthesis_timeout,
-                                )
-                                .await
-                                {
-                                    // Fatal error during synthesis
-                                    break;
-                                }
-                            } else {
-                                warn!(
-                                    session_id = %session.id,
-                                    provider_id = %session.provider_id,
-                                    "Provider not found during timeout flush synthesis"
-                                );
+                            // Synthesize the flushed sentence with concurrency permit (FR-019)
+                            if !synthesize_and_stream_with_timeout(
+                                vec![sentence],
+                                session,
+                                &mut bp_sender,
+                                state.providers(),
+                                &session_guard,
+                                synthesis_timeout,
+                            )
+                            .await
+                            {
+                                // Fatal error during synthesis
+                                break;
                             }
                         }
                     }
@@ -475,41 +467,52 @@ where
 
         // Try to synthesize the flushed content (best effort during shutdown)
         if let Some(provider) = providers.get(&session.provider_id) {
-            // Use a fresh cancellation token - we want to complete this synthesis
-            // even though we're shutting down (graceful completion)
-            let cancel_token = CancellationToken::new();
-
-            // Request audio in the provider's native format
-            if let Ok(mut audio_stream) = provider
-                .synthesize(
-                    &sentence.text,
-                    &session.voice,
-                    session.native_format.clone(),
-                    cancel_token,
-                )
+            // Acquire synthesis permit (FR-019: per-provider concurrency limiting)
+            // Best effort during shutdown - if we can't get a permit, skip synthesis
+            // The permit is intentionally held for the entire synthesis duration (RAII)
+            #[allow(clippy::significant_drop_tightening)]
+            if let Some(_permit) = providers
+                .acquire_synthesis_permit(&session.provider_id)
                 .await
             {
-                // Stream the audio chunks
-                while let Some(chunk_result) = audio_stream.next().await {
-                    if let Ok(mut chunk) = chunk_result {
-                        chunk.sentence_index = sentence.index;
+                // Use a fresh cancellation token - we want to complete this synthesis
+                // even though we're shutting down (graceful completion)
+                let cancel_token = CancellationToken::new();
 
-                        // Transcode if needed (native_format -> audio_format)
-                        let Ok(chunk) =
-                            transcode_chunk(chunk, &session.native_format, &session.audio_format)
-                        else {
-                            break; // Best effort during shutdown
-                        };
+                // Request audio in the provider's native format
+                if let Ok(mut audio_stream) = provider
+                    .synthesize(
+                        &sentence.text,
+                        &session.voice,
+                        session.native_format.clone(),
+                        cancel_token,
+                    )
+                    .await
+                {
+                    // Stream the audio chunks
+                    while let Some(chunk_result) = audio_stream.next().await {
+                        if let Ok(mut chunk) = chunk_result {
+                            chunk.sentence_index = sentence.index;
 
-                        // Record stats after transcoding
-                        let mut chunk = chunk;
-                        chunk.sequence =
-                            session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
+                            // Transcode if needed (native_format -> audio_format)
+                            let Ok(chunk) = transcode_chunk(
+                                chunk,
+                                &session.native_format,
+                                &session.audio_format,
+                            ) else {
+                                break; // Best effort during shutdown
+                            };
 
-                        let frame = chunk.to_binary_frame();
-                        if sender.send_binary(frame.to_vec()).await.is_err() {
-                            // Connection may have closed, break out
-                            break;
+                            // Record stats after transcoding
+                            let mut chunk = chunk;
+                            chunk.sequence =
+                                session.record_audio_chunk(chunk.duration_ms, chunk.data.len());
+
+                            let frame = chunk.to_binary_frame();
+                            if sender.send_binary(frame.to_vec()).await.is_err() {
+                                // Connection may have closed, break out
+                                break;
+                            }
                         }
                     }
                 }
@@ -711,32 +714,10 @@ where
                             "Extracted sentences from buffer"
                         );
 
-                        // Get the provider for synthesis
-                        if let Some(provider) = providers.get(&session.provider_id) {
-                            // Synthesize sentences and stream audio to WebSocket with backpressure
-                            if !synthesize_and_stream(sentences, session, sender, provider.as_ref())
-                                .await
-                            {
-                                // Fatal error during synthesis/streaming
-                                return false;
-                            }
-                        } else {
-                            // Provider disappeared - this shouldn't happen but handle gracefully
-                            warn!(
-                                session_id = %session.id,
-                                provider_id = %session.provider_id,
-                                "Provider not found during synthesis"
-                            );
-                            let response = ServerMessage::error(
-                                "provider_gone",
-                                "TTS provider is no longer available",
-                            );
-                            if let Err(err) =
-                                send_server_message(sender.inner_mut(), &response).await
-                            {
-                                warn!("Failed to send error: {}", err);
-                                return false;
-                            }
+                        // Synthesize sentences with concurrency permit (FR-019)
+                        if !synthesize_and_stream(sentences, session, sender, providers).await {
+                            // Fatal error during synthesis/streaming
+                            return false;
                         }
                     }
 
@@ -789,25 +770,11 @@ where
                             "Flushed remaining buffer content"
                         );
 
-                        // Synthesize the flushed sentence
-                        if let Some(provider) = providers.get(&session.provider_id) {
-                            if !synthesize_and_stream(
-                                vec![sentence],
-                                session,
-                                sender,
-                                provider.as_ref(),
-                            )
-                            .await
-                            {
-                                // Fatal error during synthesis
-                                return false;
-                            }
-                        } else {
-                            warn!(
-                                session_id = %session.id,
-                                provider_id = %session.provider_id,
-                                "Provider not found during flush synthesis"
-                            );
+                        // Synthesize with concurrency permit (FR-019)
+                        if !synthesize_and_stream(vec![sentence], session, sender, providers).await
+                        {
+                            // Fatal error during synthesis
+                            return false;
                         }
                     }
 
@@ -1186,7 +1153,7 @@ where
 /// * `sentences` - Sentences to synthesize (extracted from the buffer)
 /// * `session` - Mutable reference to update statistics
 /// * `sender` - WebSocket sender for streaming audio frames
-/// * `provider` - The TTS provider to use for synthesis
+/// * `providers` - The provider registry for looking up providers and acquiring permits
 ///
 /// # Returns
 ///
@@ -1209,13 +1176,47 @@ async fn synthesize_and_stream<S>(
     sentences: Vec<Sentence>,
     session: &mut Session,
     sender: &mut BackpressureSender<S>,
-    provider: &dyn TtsProvider,
+    providers: &ProviderRegistry,
 ) -> bool
 where
     S: SinkExt<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
     for sentence in sentences {
+        // Get the provider for this session
+        let Some(provider) = providers.get(&session.provider_id) else {
+            warn!(
+                session_id = %session.id,
+                provider_id = %session.provider_id,
+                "Provider not found during synthesis"
+            );
+            let response =
+                ServerMessage::error("provider_gone", "TTS provider is no longer available");
+            if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
+                warn!("Failed to send provider error: {}", send_err);
+                return false;
+            }
+            return true;
+        };
+
+        // Acquire synthesis permit (FR-019: per-provider concurrency limiting)
+        // The permit is intentionally held for the entire synthesis + streaming duration (RAII)
+        #[allow(clippy::significant_drop_tightening)]
+        let Some(permit) = providers
+            .acquire_synthesis_permit(&session.provider_id)
+            .await
+        else {
+            warn!(
+                session_id = %session.id,
+                provider_id = %session.provider_id,
+                "Failed to acquire synthesis permit"
+            );
+            // This shouldn't happen if provider exists, but handle gracefully
+            continue;
+        };
+        // Keep permit alive for the duration of synthesis and streaming
+        let _permit = permit;
+
         debug!(
             session_id = %session.id,
             sentence_index = sentence.index,
@@ -1499,32 +1500,17 @@ where
                         "Extracted sentences from buffer"
                     );
 
-                    if let Some(provider) = providers.get(&session.provider_id) {
-                        if !synthesize_and_stream_with_cancellation(
-                            sentences,
-                            session,
-                            sender,
-                            provider.as_ref(),
-                            session_guard,
-                        )
-                        .await
-                        {
-                            return false;
-                        }
-                    } else {
-                        warn!(
-                            session_id = %session.id,
-                            provider_id = %session.provider_id,
-                            "Provider not found during synthesis"
-                        );
-                        let response = ServerMessage::error(
-                            "provider_gone",
-                            "TTS provider is no longer available",
-                        );
-                        if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
-                            warn!("Failed to send error: {}", err);
-                            return false;
-                        }
+                    // Synthesize with concurrency permit (FR-019)
+                    if !synthesize_and_stream_with_cancellation(
+                        sentences,
+                        session,
+                        sender,
+                        providers,
+                        session_guard,
+                    )
+                    .await
+                    {
+                        return false;
                     }
                 }
 
@@ -1573,24 +1559,17 @@ where
                         "Flushed remaining buffer content"
                     );
 
-                    if let Some(provider) = providers.get(&session.provider_id) {
-                        if !synthesize_and_stream_with_cancellation(
-                            vec![sentence],
-                            session,
-                            sender,
-                            provider.as_ref(),
-                            session_guard,
-                        )
-                        .await
-                        {
-                            return false;
-                        }
-                    } else {
-                        warn!(
-                            session_id = %session.id,
-                            provider_id = %session.provider_id,
-                            "Provider not found during flush synthesis"
-                        );
+                    // Synthesize with concurrency permit (FR-019)
+                    if !synthesize_and_stream_with_cancellation(
+                        vec![sentence],
+                        session,
+                        sender,
+                        providers,
+                        session_guard,
+                    )
+                    .await
+                    {
+                        return false;
                     }
                 }
 
@@ -1644,7 +1623,7 @@ where
 /// * `sentences` - Sentences to synthesize
 /// * `session` - Mutable reference to update statistics
 /// * `sender` - WebSocket sender for streaming audio frames
-/// * `provider` - The TTS provider to use for synthesis
+/// * `providers` - The provider registry for looking up providers and acquiring permits
 /// * `session_guard` - Session guard providing cancellation tokens
 ///
 /// # Returns
@@ -1655,7 +1634,7 @@ async fn synthesize_and_stream_with_cancellation<S>(
     sentences: Vec<Sentence>,
     session: &mut Session,
     sender: &mut BackpressureSender<S>,
-    provider: &dyn TtsProvider,
+    providers: &ProviderRegistry,
     session_guard: &SessionGuard,
 ) -> bool
 where
@@ -1672,6 +1651,40 @@ where
             );
             return true; // Return true to allow graceful shutdown handler to run
         }
+
+        // Get the provider for this session
+        let Some(provider) = providers.get(&session.provider_id) else {
+            warn!(
+                session_id = %session.id,
+                provider_id = %session.provider_id,
+                "Provider not found during synthesis"
+            );
+            let response =
+                ServerMessage::error("provider_gone", "TTS provider is no longer available");
+            if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
+                warn!("Failed to send provider error: {}", send_err);
+                return false;
+            }
+            return true;
+        };
+
+        // Acquire synthesis permit (FR-019: per-provider concurrency limiting)
+        // The permit is intentionally held for the entire synthesis + streaming duration (RAII)
+        #[allow(clippy::significant_drop_tightening)]
+        let Some(permit) = providers
+            .acquire_synthesis_permit(&session.provider_id)
+            .await
+        else {
+            warn!(
+                session_id = %session.id,
+                provider_id = %session.provider_id,
+                "Failed to acquire synthesis permit"
+            );
+            // This shouldn't happen if provider exists, but handle gracefully
+            continue;
+        };
+        // Keep permit alive for the duration of synthesis and streaming
+        let _permit = permit;
 
         debug!(
             session_id = %session.id,
@@ -1828,7 +1841,7 @@ where
 /// * `sentences` - Sentences to synthesize
 /// * `session` - Mutable reference to update statistics
 /// * `sender` - WebSocket sender for streaming audio frames
-/// * `provider` - The TTS provider to use for synthesis
+/// * `providers` - The provider registry for looking up providers and acquiring permits
 /// * `session_guard` - Session guard providing cancellation tokens
 /// * `timeout` - Maximum time allowed for synthesizing each sentence
 ///
@@ -1840,7 +1853,7 @@ async fn synthesize_and_stream_with_timeout<S>(
     sentences: Vec<Sentence>,
     session: &mut Session,
     sender: &mut BackpressureSender<S>,
-    provider: &dyn TtsProvider,
+    providers: &ProviderRegistry,
     session_guard: &SessionGuard,
     timeout: Duration,
 ) -> bool
@@ -1858,6 +1871,40 @@ where
             );
             return true;
         }
+
+        // Get the provider for this session
+        let Some(provider) = providers.get(&session.provider_id) else {
+            warn!(
+                session_id = %session.id,
+                provider_id = %session.provider_id,
+                "Provider not found during synthesis"
+            );
+            let response =
+                ServerMessage::error("provider_gone", "TTS provider is no longer available");
+            if let Err(send_err) = send_server_message(sender.inner_mut(), &response).await {
+                warn!("Failed to send provider error: {}", send_err);
+                return false;
+            }
+            return true;
+        };
+
+        // Acquire synthesis permit (FR-019: per-provider concurrency limiting)
+        // The permit is intentionally held for the entire synthesis + streaming duration (RAII)
+        #[allow(clippy::significant_drop_tightening)]
+        let Some(permit) = providers
+            .acquire_synthesis_permit(&session.provider_id)
+            .await
+        else {
+            warn!(
+                session_id = %session.id,
+                provider_id = %session.provider_id,
+                "Failed to acquire synthesis permit"
+            );
+            // This shouldn't happen if provider exists, but handle gracefully
+            continue;
+        };
+        // Keep permit alive for the duration of synthesis and streaming
+        let _permit = permit;
 
         debug!(
             session_id = %session.id,
@@ -2234,33 +2281,18 @@ where
                         "Extracted sentences from buffer"
                     );
 
-                    if let Some(provider) = providers.get(&session.provider_id) {
-                        if !synthesize_and_stream_with_timeout(
-                            sentences,
-                            session,
-                            sender,
-                            provider.as_ref(),
-                            session_guard,
-                            synthesis_timeout,
-                        )
-                        .await
-                        {
-                            return false;
-                        }
-                    } else {
-                        warn!(
-                            session_id = %session.id,
-                            provider_id = %session.provider_id,
-                            "Provider not found during synthesis"
-                        );
-                        let response = ServerMessage::error(
-                            "provider_gone",
-                            "TTS provider is no longer available",
-                        );
-                        if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
-                            warn!("Failed to send error: {}", err);
-                            return false;
-                        }
+                    // Synthesize with concurrency permit (FR-019)
+                    if !synthesize_and_stream_with_timeout(
+                        sentences,
+                        session,
+                        sender,
+                        providers,
+                        session_guard,
+                        synthesis_timeout,
+                    )
+                    .await
+                    {
+                        return false;
                     }
                 }
 
@@ -2309,25 +2341,18 @@ where
                         "Flushed remaining buffer content"
                     );
 
-                    if let Some(provider) = providers.get(&session.provider_id) {
-                        if !synthesize_and_stream_with_timeout(
-                            vec![sentence],
-                            session,
-                            sender,
-                            provider.as_ref(),
-                            session_guard,
-                            synthesis_timeout,
-                        )
-                        .await
-                        {
-                            return false;
-                        }
-                    } else {
-                        warn!(
-                            session_id = %session.id,
-                            provider_id = %session.provider_id,
-                            "Provider not found during flush synthesis"
-                        );
+                    // Synthesize with concurrency permit (FR-019)
+                    if !synthesize_and_stream_with_timeout(
+                        vec![sentence],
+                        session,
+                        sender,
+                        providers,
+                        session_guard,
+                        synthesis_timeout,
+                    )
+                    .await
+                    {
+                        return false;
                     }
                 }
 
