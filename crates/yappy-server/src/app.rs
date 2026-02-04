@@ -382,7 +382,7 @@ mod tests {
         assert_eq!(health.status, HealthStatus::Degraded);
     }
 
-    /// Test that /health includes NotConfigured providers that weren't registered
+    /// Test that /health includes `NotConfigured` providers that weren't registered
     /// (fixes #18: /health endpoint omits NotConfigured/Unavailable providers)
     #[tokio::test]
     async fn test_health_includes_not_configured_providers() {
@@ -448,18 +448,18 @@ mod tests {
             ProviderStatus::NotConfigured { reason } => {
                 assert_eq!(reason, "API key not set");
             }
-            other => panic!("Expected NotConfigured, got {:?}", other),
+            other => panic!("Expected NotConfigured, got {other:?}"),
         }
 
         match &health.providers["avspeech"].status {
             ProviderStatus::Unavailable { reason } => {
                 assert_eq!(reason, "macOS only");
             }
-            other => panic!("Expected Unavailable, got {:?}", other),
+            other => panic!("Expected Unavailable, got {other:?}"),
         }
     }
 
-    /// Test that /health returns unhealthy when only NotConfigured providers exist
+    /// Test that /health returns unhealthy when only `NotConfigured` providers exist
     #[tokio::test]
     async fn test_health_unhealthy_with_only_not_configured_providers() {
         let config = create_test_config();
