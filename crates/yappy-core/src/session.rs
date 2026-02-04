@@ -236,7 +236,7 @@ impl VoiceConfig {
 mod tests {
     use super::*;
 
-    /// Test that VoiceConfig can be deserialized with only speed specified (protocol contract)
+    /// Test that `VoiceConfig` can be deserialized with only speed specified (protocol contract)
     #[test]
     fn test_voice_config_partial_speed_only() {
         let json = r#"{"speed": 1.5}"#;
@@ -247,7 +247,7 @@ mod tests {
         assert!((config.volume - 1.0).abs() < f32::EPSILON); // default
     }
 
-    /// Test that VoiceConfig can be deserialized with only pitch specified
+    /// Test that `VoiceConfig` can be deserialized with only pitch specified
     #[test]
     fn test_voice_config_partial_pitch_only() {
         let json = r#"{"pitch": 0.5}"#;
@@ -258,10 +258,10 @@ mod tests {
         assert!((config.volume - 1.0).abs() < f32::EPSILON); // default
     }
 
-    /// Test that empty VoiceConfig object deserializes with all defaults
+    /// Test that empty `VoiceConfig` object deserializes with all defaults
     #[test]
     fn test_voice_config_empty_object() {
-        let json = r#"{}"#;
+        let json = "{}";
         let config: VoiceConfig = serde_json::from_str(json).unwrap();
         assert!(config.id.is_empty());
         assert!((config.speed - 1.0).abs() < f32::EPSILON);
@@ -269,7 +269,7 @@ mod tests {
         assert!((config.volume - 1.0).abs() < f32::EPSILON);
     }
 
-    /// Test that VoiceConfig works with mixed specified and default fields
+    /// Test that `VoiceConfig` works with mixed specified and default fields
     #[test]
     fn test_voice_config_partial_mixed() {
         let json = r#"{"id": "af_bella", "volume": 0.8}"#;
@@ -280,14 +280,14 @@ mod tests {
         assert!((config.volume - 0.8).abs() < f32::EPSILON);
     }
 
-    /// Test that VoiceConfig validation passes for defaults
+    /// Test that `VoiceConfig` validation passes for defaults
     #[test]
     fn test_voice_config_default_validates() {
         let config = VoiceConfig::default();
         assert!(config.validate().is_ok());
     }
 
-    /// Test that VoiceConfig validation fails for out-of-range speed
+    /// Test that `VoiceConfig` validation fails for out-of-range speed
     #[test]
     fn test_voice_config_validation_speed_out_of_range() {
         let config = VoiceConfig {

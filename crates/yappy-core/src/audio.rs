@@ -213,7 +213,7 @@ mod tests {
         assert!(AudioChunk::from_binary_frame(&just_header).is_some());
     }
 
-    /// Test that AudioFormat can be deserialized with only codec specified (protocol contract)
+    /// Test that `AudioFormat` can be deserialized with only codec specified (protocol contract)
     #[test]
     fn test_audio_format_partial_codec_only() {
         let json = r#"{"codec": "opus"}"#;
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(format.channels, 1); // default
     }
 
-    /// Test that AudioFormat can be deserialized with only sample_rate specified
+    /// Test that `AudioFormat` can be deserialized with only `sample_rate` specified
     #[test]
     fn test_audio_format_partial_sample_rate_only() {
         let json = r#"{"sample_rate": 24000}"#;
@@ -233,17 +233,17 @@ mod tests {
         assert_eq!(format.channels, 1); // default
     }
 
-    /// Test that empty AudioFormat object deserializes with all defaults
+    /// Test that empty `AudioFormat` object deserializes with all defaults
     #[test]
     fn test_audio_format_empty_object() {
-        let json = r#"{}"#;
+        let json = "{}";
         let format: AudioFormat = serde_json::from_str(json).unwrap();
         assert_eq!(format.codec, AudioCodec::Opus);
         assert_eq!(format.sample_rate, 48000);
         assert_eq!(format.channels, 1);
     }
 
-    /// Test that AudioFormat works with mixed specified and default fields
+    /// Test that `AudioFormat` works with mixed specified and default fields
     #[test]
     fn test_audio_format_partial_mixed() {
         let json = r#"{"codec": "mp3", "channels": 2}"#;
