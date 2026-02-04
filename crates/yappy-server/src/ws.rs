@@ -661,6 +661,21 @@ where
                         return true;
                     };
 
+                    // Reject text messages when session is completing or closed
+                    if session.state == SessionState::Completing
+                        || session.state == SessionState::Closed
+                    {
+                        let response = ServerMessage::error(
+                            "session_closed",
+                            "Cannot send text after text.done - session is completing or closed",
+                        );
+                        if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                            warn!("Failed to send response: {}", err);
+                            return false;
+                        }
+                        return true;
+                    }
+
                     // Update last activity timestamp
                     session.touch();
 
@@ -730,6 +745,21 @@ where
                         }
                         return true;
                     };
+
+                    // Reject duplicate text.done when session is already completing or closed
+                    if session.state == SessionState::Completing
+                        || session.state == SessionState::Closed
+                    {
+                        let response = ServerMessage::error(
+                            "duplicate_done",
+                            "text.done already received - session is completing or closed",
+                        );
+                        if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                            warn!("Failed to send response: {}", err);
+                            return false;
+                        }
+                        return true;
+                    }
 
                     // Transition to Completing state
                     session.state = SessionState::Completing;
@@ -1371,6 +1401,21 @@ where
                     return true;
                 };
 
+                // Reject text messages when session is completing or closed
+                if session.state == SessionState::Completing
+                    || session.state == SessionState::Closed
+                {
+                    let response = ServerMessage::error(
+                        "session_closed",
+                        "Cannot send text after text.done - session is completing or closed",
+                    );
+                    if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                        warn!("Failed to send response: {}", err);
+                        return false;
+                    }
+                    return true;
+                }
+
                 session.touch();
 
                 if session.state == SessionState::Ready {
@@ -1435,6 +1480,21 @@ where
                     }
                     return true;
                 };
+
+                // Reject duplicate text.done when session is already completing or closed
+                if session.state == SessionState::Completing
+                    || session.state == SessionState::Closed
+                {
+                    let response = ServerMessage::error(
+                        "duplicate_done",
+                        "text.done already received - session is completing or closed",
+                    );
+                    if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                        warn!("Failed to send response: {}", err);
+                        return false;
+                    }
+                    return true;
+                }
 
                 session.state = SessionState::Completing;
                 debug!(
@@ -2014,6 +2074,21 @@ where
                     return true;
                 };
 
+                // Reject text messages when session is completing or closed
+                if session.state == SessionState::Completing
+                    || session.state == SessionState::Closed
+                {
+                    let response = ServerMessage::error(
+                        "session_closed",
+                        "Cannot send text after text.done - session is completing or closed",
+                    );
+                    if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                        warn!("Failed to send response: {}", err);
+                        return false;
+                    }
+                    return true;
+                }
+
                 session.touch();
 
                 if session.state == SessionState::Ready {
@@ -2079,6 +2154,21 @@ where
                     }
                     return true;
                 };
+
+                // Reject duplicate text.done when session is already completing or closed
+                if session.state == SessionState::Completing
+                    || session.state == SessionState::Closed
+                {
+                    let response = ServerMessage::error(
+                        "duplicate_done",
+                        "text.done already received - session is completing or closed",
+                    );
+                    if let Err(err) = send_server_message(sender.inner_mut(), &response).await {
+                        warn!("Failed to send response: {}", err);
+                        return false;
+                    }
+                    return true;
+                }
 
                 session.state = SessionState::Completing;
                 debug!(
